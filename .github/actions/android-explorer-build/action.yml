@@ -11,6 +11,10 @@ inputs:
     description: Set project properties for gradle when building explorer
     required: false
     default: ''
+  verify-sparkling:
+    description: Build and verify both Sparkling-enabled and disabled Explorer flavors
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -21,6 +25,8 @@ runs:
         python-version: '3.13'
     - name: Install Common Dependencies
       uses: ./lynx/.github/actions/common-deps
+      with:
+        target: ${{ inputs.verify-sparkling == 'true' && 'sparkling' || '' }}
     - name: Build Explorer App
       shell: bash
       run: |-
@@ -28,6 +34,12 @@ runs:
         source tools/envsetup.sh
         pushd explorer/android
         ./gradlew :LynxExplorer:assembleNoasanRelease -Penable_trace=perfetto -PabiList=${{ inputs.abi-list }} --no-daemon ${{ inputs.build-params }}
+        if [[ '${{ inputs.verify-sparkling }}' == 'true' ]]; then
+          ./gradlew :LynxExplorer:testWithoutSparklingNoasanDebugUnitTest \
+            :LynxExplorer:testWithSparklingNoasanDebugUnitTest \
+            :LynxExplorer:verifySparklingAndroidRuntimeSmokeTestArtifacts \
+            -Penable_trace=perfetto -PabiList=${{ inputs.abi-list }} --no-daemon ${{ inputs.build-params }}
+        fi
         popd
     - name: upload artifact
       uses: lynx-infra/upload-artifact@332ec52e99f7cbf1fbbdc9bcc09280d49147d092

@@ -461,6 +461,7 @@ jobs:
         with:
           abi-list: x86,arm64-v8a
           build-params: -PIntegrationTest
+          verify-sparkling: 'true'
 
   windows-explorer-build-x64:
     runs-on: lynx-windows-2022-large
