@@ -5,6 +5,7 @@
 #import <Lynx/LynxComponentRegistry.h>
 #import <Lynx/LynxProviderRegistry.h>
 #import <Lynx/LynxResourceProvider.h>
+#import <Lynx/LynxTemplateBundle+Converter.h>
 #import <Lynx/LynxTemplateBundle.h>
 #import <Lynx/LynxTemplateBundleOption.h>
 #import <LynxDevtool/LynxDebugInfoRecorderDelegate.h>
@@ -23,6 +24,17 @@
 #define SCREEN_HEIGHT [UIScreen mainScreen].bounds.size.height
 
 static const int kVirtual = 1 << 2;
+
+@interface LynxRecorderDynamicComponentFetcher (ReplayResources)
+- (void)parse:(NSArray*)actionList
+              scripts:(NSDictionary*)scripts
+    invokedMethodData:(NSArray*)invokedMethodData
+         callbackData:(NSDictionary*)callbackData;
+- (nullable NSString*)prepareLoadScriptBootstrapForURLs:(NSArray<NSString*>*)urls;
+- (nullable NSString*)materializedScriptURLForURL:(NSString*)url;
+- (nullable NSData*)recordedScriptForURL:(NSString*)url;
+- (void)setRecordedTemplateBundle:(LynxTemplateBundle*)bundle forURL:(NSString*)url;
+@end
 
 // record some action, which must be called again when page reload
 @interface ReloadAction : NSObject
@@ -56,6 +68,17 @@ static const int kVirtual = 1 << 2;
 @end
 
 @implementation LynxRecorderReplayDataProviderInternal
+- (instancetype)init {
+  if (self = [super init]) {
+    _functionCall = @[];
+    _callbackData = @{};
+    _jsbIgnoredInfo = @[];
+    _jsbSettings = @{};
+    _sharedData = @{};
+  }
+  return self;
+}
+
 - (NSDictionary*)getJsbSettings {
   return _jsbSettings;
 }
@@ -104,6 +127,7 @@ static const int kVirtual = 1 << 2;
 @property LynxTemplateBundle* templateBundle;
 @property LynxTemplateBundleOption* templateBundleOption;
 @property NSDictionary* templateBundleParams;
+@property NSArray<NSString*>* preloadScriptPaths;
 @property CGSize screenSize;
 @property(nonatomic, strong) NSMutableArray* actionCallbacks;
 @property(nonatomic, strong) id<LynxRecorderTouchHelper> touchHelper;
@@ -193,6 +217,13 @@ static const int kVirtual = 1 << 2;
   [self.actionCallbacks addObject:callback];
 }
 
+- (void)configureReplayResourceFetchersForBuilder:(LynxViewBuilder*)builder {
+  builder.fetcher = self.dynamicComponentFetcher;
+  builder.enableGenericResourceFetcher = LynxBooleanOptionTrue;
+  builder.genericResourceFetcher = self.dynamicComponentFetcher;
+  builder.templateResourceFetcher = self.dynamicComponentFetcher;
+}
+
 - (void)registerTouchHelper:(id<LynxRecorderTouchHelper>)touchHelper {
   self.touchHelper = touchHelper;
 }
@@ -242,6 +273,18 @@ static const int kVirtual = 1 << 2;
               NavBar:CGSizeMake(0, 0)];
 }
 
+- (CGRect)replayFrameForScreenBounds:(CGRect)screenBounds
+                       defaultOrigin:(CGPoint)defaultOrigin
+                   navigationBarSize:(CGSize)navigationBarSize
+                     statusBarHeight:(CGFloat)statusBarHeight {
+  if (self.replayConfig.edgeToEdge) {
+    return screenBounds;
+  }
+  CGFloat height =
+      MAX(0, CGRectGetHeight(screenBounds) - navigationBarSize.height - statusBarHeight);
+  return CGRectMake(defaultOrigin.x, defaultOrigin.y, CGRectGetWidth(screenBounds), height);
+}
+
 - (void)startWithUrl:(NSString*)url
               inView:(UIView*)parentView
           withOrigin:(CGPoint)point
@@ -258,19 +301,24 @@ static const int kVirtual = 1 << 2;
   _dataProvider = [[LynxRecorderReplayDataProviderInternal alloc] init];
   _parentUI = parentView;
   [_parentUI setBackgroundColor:self.replayConfig.backgroundColor];
-  _origin = point;
+  CGRect replayFrame = [self
+      replayFrameForScreenBounds:[UIScreen mainScreen].bounds
+                   defaultOrigin:point
+               navigationBarSize:navBarSize
+                 statusBarHeight:[UIApplication sharedApplication].statusBarFrame.size.height];
+  _origin = replayFrame.origin;
   _stateView = [[LynxRecorderReplayStateView alloc] init];
   _startTime = 0;
   _hasLoadTemplate = NO;
-  _screenSize.width = [UIScreen mainScreen].bounds.size.width;
-  _screenSize.height = [UIScreen mainScreen].bounds.size.height - navBarSize.height -
-                       [UIApplication sharedApplication].statusBarFrame.size.height;
+  _screenSize = replayFrame.size;
   _threadStrategyData = nil;
   _templateBundle = nil;
   _templateBundleOption = [[LynxTemplateBundleOption alloc] init];
   [_templateBundleOption setContextPoolSize:5];
   [_templateBundleOption setEnableContextAutoRefill:true];
   _templateBundleParams = nil;
+  _preloadScriptPaths = @[];
+  _componentList = @[];
   _lynxView = nil;
   _lynxThemeCache = nil;
   _config = nil;
@@ -293,11 +341,18 @@ static const int kVirtual = 1 << 2;
 }
 
 - (BOOL)checkRecordFile:(NSArray*)actionList {
-  for (int index = 0; index < actionList.count; ++index) {
-    NSDictionary* obj = actionList[index];
+  if (![actionList isKindOfClass:[NSArray class]]) {
+    return false;
+  }
+  for (id value in actionList) {
+    if (![value isKindOfClass:[NSDictionary class]]) {
+      continue;
+    }
+    NSDictionary* obj = value;
     if ([obj[@"Function Name"] isEqual:@"loadTemplate"] ||
         [obj[@"Function Name"] isEqual:@"loadTemplateBundle"]) {
-      _templateBundleParams = obj[@"Params"];
+      _templateBundleParams =
+          [obj[@"Params"] isKindOfClass:[NSDictionary class]] ? obj[@"Params"] : @{};
       return true;
     }
   }
@@ -311,8 +366,17 @@ static const int kVirtual = 1 << 2;
 }
 
 - (void)handleRecordFileData:(NSData*)data {
+  if (data.length == 0) {
+    NSLog(@"[TestBench] Replay record file is empty or unavailable.");
+    [self.stateView setReplayState:INVALID_JSON_FILE];
+    return;
+  }
   NSString* encodedString = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-  NSError* jsonError;
+  if (encodedString.length == 0) {
+    [self.stateView setReplayState:INVALID_JSON_FILE];
+    return;
+  }
+  NSError* jsonError = nil;
   NSDictionary* json = nil;
   if ([encodedString hasPrefix:@"{"]) {
     json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
@@ -321,8 +385,10 @@ static const int kVirtual = 1 << 2;
         [[NSData alloc] initWithBase64EncodedString:encodedString
                                             options:NSDataBase64DecodingIgnoreUnknownCharacters];
     NSData* unZipData = [self zlibDeflate:decodedData];
-    json = [NSJSONSerialization JSONObjectWithData:unZipData options:0 error:&jsonError];
-    if (jsonError != nil) {
+    if (unZipData.length > 0) {
+      json = [NSJSONSerialization JSONObjectWithData:unZipData options:0 error:&jsonError];
+    }
+    if (jsonError != nil && unZipData.length > 0) {
       // NSCocoaErrorDomain caused by invalid json parsing
       if (jsonError.code == 3840) {
         jsonError = nil;
@@ -333,60 +399,141 @@ static const int kVirtual = 1 << 2;
       }
     }
   }
-  if (jsonError != nil) {
+  if (jsonError != nil || ![json isKindOfClass:[NSDictionary class]]) {
     [self.stateView setReplayState:INVALID_JSON_FILE];
     return;
   }
   self.moduleList = [NSMutableArray new];
-  if ([json objectForKey:@"Config"] && json[@"Config"] != [NSNull null]) {
-    _config = json[@"Config"];
-    // Set jsb ignored info
-    if ([_config objectForKey:@"jsbIgnoredInfo"]) {
-      self.dataProvider.jsbIgnoredInfo = [_config objectForKey:@"jsbIgnoredInfo"];
-    }
-
-    if ([_config objectForKey:@"jsbSettings"]) {
-      self.dataProvider.jsbSettings = [_config objectForKey:@"jsbSettings"];
-    }
+  _config = [json[@"Config"] isKindOfClass:[NSDictionary class]] ? json[@"Config"] : @{};
+  id jsbIgnoredInfo = _config[@"jsbIgnoredInfo"];
+  if ([jsbIgnoredInfo isKindOfClass:[NSArray class]]) {
+    self.dataProvider.jsbIgnoredInfo = jsbIgnoredInfo;
   }
-  if ([json objectForKey:@"Debug Info"]) {
-    NSArray* debugInfoList = [json objectForKey:@"Debug Info"];
-    for (NSDictionary* infoDict in debugInfoList) {
-      NSString* url = infoDict[@"url"];
-      NSString* content = infoDict[@"content"];
+  id jsbSettings = _config[@"jsbSettings"];
+  if ([jsbSettings isKindOfClass:[NSDictionary class]]) {
+    self.dataProvider.jsbSettings = jsbSettings;
+  }
+
+  NSArray* debugInfoList =
+      [json[@"Debug Info"] isKindOfClass:[NSArray class]] ? json[@"Debug Info"] : @[];
+  for (id value in debugInfoList) {
+    if ([value isKindOfClass:[NSDictionary class]]) {
+      NSDictionary* infoDict = value;
+      NSString* url = [infoDict[@"url"] isKindOfClass:[NSString class]] ? infoDict[@"url"] : nil;
+      NSString* content =
+          [infoDict[@"content"] isKindOfClass:[NSString class]] ? infoDict[@"content"] : nil;
+      if (url.length == 0 || content.length == 0) {
+        continue;
+      }
       [self.lynxDebugInfoRecorderDelegate setDebugInfo:url debugInfo:content];
     }
   }
-  if ([json objectForKey:@"Invoked Method Data"]) {
-    self.dataProvider.functionCall = json[@"Invoked Method Data"];
-  }
-  if ([json objectForKey:@"Callback"]) {
-    self.dataProvider.callbackData = json[@"Callback"];
-  }
 
-  if ([json objectForKey:@"SharedData"]) {
-    self.dataProvider.sharedData = json[@"SharedData"];
-  }
+  self.dataProvider.functionCall = [json[@"Invoked Method Data"] isKindOfClass:[NSArray class]]
+                                       ? json[@"Invoked Method Data"]
+                                       : @[];
+  self.dataProvider.callbackData =
+      [json[@"Callback"] isKindOfClass:[NSDictionary class]] ? json[@"Callback"] : @{};
+  self.dataProvider.sharedData =
+      [json[@"SharedData"] isKindOfClass:[NSDictionary class]] ? json[@"SharedData"] : @{};
 
-  if ([json objectForKey:@"Component List"]) {
+  if ([json[@"Component List"] isKindOfClass:[NSArray class]]) {
     [self mockComponent:json[@"Component List"]];
   }
-  if ([json objectForKey:@"Action List"]) {
-    if ([self checkRecordFile:[json objectForKey:@"Action List"]]) {
-      NSPredicate* predicate = [NSPredicate predicateWithFormat:@"SELF != %@", [NSNull null]];
-      NSArray* actionList =
-          [[json objectForKey:@"Action List"] filteredArrayUsingPredicate:predicate];
-      [self.dynamicComponentFetcher parse:actionList];
-      [self.stateView setReplayState:HANDLE_ACTION_LIST];
-      [self handleActionList:actionList];
-    } else {
-      [self.stateView setReplayState:RECORD_ERROR_MISS_TEMPLATEJS];
+  NSArray* rawActionList =
+      [json[@"Action List"] isKindOfClass:[NSArray class]] ? json[@"Action List"] : nil;
+  if (rawActionList == nil) {
+    [self.stateView setReplayState:INVALID_JSON_FILE];
+    return;
+  }
+  NSMutableArray<NSDictionary*>* actionList = [NSMutableArray array];
+  for (id value in rawActionList) {
+    if ([value isKindOfClass:[NSDictionary class]]) {
+      [actionList addObject:value];
     }
   }
+  if (![self checkRecordFile:actionList]) {
+    [self.stateView setReplayState:RECORD_ERROR_MISS_TEMPLATEJS];
+    return;
+  }
+
+  NSDictionary* scripts =
+      [json[@"Scripts"] isKindOfClass:[NSDictionary class]] ? json[@"Scripts"] : @{};
+  NSDictionary* preloadScripts = [json[@"Preload Scripts"] isKindOfClass:[NSDictionary class]]
+                                     ? json[@"Preload Scripts"]
+                                     : @{};
+  NSMutableDictionary* recordedResources = [scripts mutableCopy];
+  [recordedResources addEntriesFromDictionary:preloadScripts];
+  [self.dynamicComponentFetcher parse:actionList
+                              scripts:recordedResources
+                    invokedMethodData:self.dataProvider.functionCall
+                         callbackData:self.dataProvider.callbackData];
+
+  NSArray* preloadScriptPaths = [json[@"Preload Script Paths"] isKindOfClass:[NSArray class]]
+                                    ? json[@"Preload Script Paths"]
+                                    : preloadScripts.allKeys;
+  NSMutableArray* validPreloadScriptPaths = [NSMutableArray array];
+  for (id path in preloadScriptPaths) {
+    if ([path isKindOfClass:[NSString class]] && preloadScripts[path] != nil) {
+      [validPreloadScriptPaths addObject:path];
+    }
+  }
+  if (recordedResources.count > 0) {
+    NSString* bootstrapPath =
+        [self.dynamicComponentFetcher prepareLoadScriptBootstrapForURLs:scripts.allKeys];
+    if (bootstrapPath.length > 0) {
+      [validPreloadScriptPaths insertObject:bootstrapPath atIndex:0];
+    }
+  }
+  NSMutableArray* materializedPreloadScriptPaths = [NSMutableArray array];
+  for (NSString* path in validPreloadScriptPaths) {
+    NSString* materializedPath = [self.dynamicComponentFetcher materializedScriptURLForURL:path];
+    [materializedPreloadScriptPaths addObject:materializedPath ?: path];
+  }
+  self.preloadScriptPaths = materializedPreloadScriptPaths;
+
+  [scripts enumerateKeysAndObjectsUsingBlock:^(id urlValue, id source, BOOL* stop) {
+    if (![urlValue isKindOfClass:[NSString class]] || ![source isKindOfClass:[NSString class]]) {
+      return;
+    }
+    NSString* url = urlValue;
+    NSData* script = [self.dynamicComponentFetcher recordedScriptForURL:url];
+    if (script.length == 0) {
+      return;
+    }
+
+    LynxTemplateBundle* recordedBundle = [[LynxTemplateBundle alloc] initWithTemplate:script];
+    if (recordedBundle.errorMsg == nil) {
+      [self.dynamicComponentFetcher setRecordedTemplateBundle:recordedBundle forURL:url];
+      return;
+    }
+
+    std::string scriptSource(static_cast<const char*>(script.bytes), script.length);
+    lynx::tasm::LynxTemplateBundle rawBundle;
+    rawBundle.AddCustomSection([url UTF8String], lynx::lepus::Value(scriptSource));
+    NSString* moduleName = [url stringByDeletingPathExtension];
+    if (![moduleName isEqualToString:url]) {
+      rawBundle.AddCustomSection([moduleName UTF8String],
+                                 lynx::lepus::Value(std::move(scriptSource)));
+    }
+    [self.dynamicComponentFetcher
+        setRecordedTemplateBundle:ConstructTemplateBundleFromNative(std::move(rawBundle))
+                           forURL:url];
+  }];
+  [self.stateView setReplayState:HANDLE_ACTION_LIST];
+  [self handleActionList:actionList];
 }
 
 - (void)runAction:(id)obj onTestBenchComplete:(void (^)(int64_t))onTestBenchComplete {
-  NSString* functionName = obj[@"Function Name"];
+  if (![obj isKindOfClass:[NSDictionary class]]) {
+    return;
+  }
+  NSString* functionName =
+      [obj[@"Function Name"] isKindOfClass:[NSString class]] ? obj[@"Function Name"] : nil;
+  NSDictionary* params = [obj[@"Params"] isKindOfClass:[NSDictionary class]] ? obj[@"Params"] : @{};
+  if (functionName.length == 0) {
+    return;
+  }
   if ([functionName isEqualToString:@"updateViewPort"] ||
       [functionName isEqualToString:@"setThreadStrategy"]) {
     functionName = @"initialLynxView";
@@ -409,8 +556,7 @@ static const int kVirtual = 1 << 2;
   if ([functionName isEqualToString:@"sendEventDarwin"] && ![self.replayConfig replayGesture]) {
     return;
   }
-  NSDictionary* params = obj[@"Params"];
-  NSInteger interval = recordTime - _startTime;
+  NSInteger interval = MAX(0, recordTime - _startTime);
   if ([[self.replayConfig reloadFuncName] containsObject:functionName]) {
     [_reloadFuncList addObject:[[ReloadAction alloc] initWithParams:interval
                                                            funcName:functionName
@@ -452,22 +598,25 @@ static const int kVirtual = 1 << 2;
       [script stringByReplacingOccurrencesOfString:@"###LYNX_RECORDER_REPLAY_TIME###"
                                         withString:[NSString stringWithFormat:@"%lld", _startTime]];
 
-  NSString* docPath =
-      [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) lastObject];
+  NSString* cachePath =
+      [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) lastObject];
+  NSString* filePath = [cachePath stringByAppendingPathComponent:@"lynx_recorder.js"];
+  NSError* writeError = nil;
+  BOOL succeeded = [script writeToFile:filePath
+                            atomically:YES
+                              encoding:NSUTF8StringEncoding
+                                 error:&writeError];
+  if (!succeeded) {
+    NSLog(@"[TestBench] Failed to materialize replay time script: %@", writeError);
+    return [NSURL fileURLWithPath:jsonPath].absoluteString;
+  }
 
-  NSString* filePath = [docPath stringByAppendingPathComponent:@"lynx_recorder.js"];
-
-  NSFileManager* fileManager = [NSFileManager defaultManager];
-
-  [fileManager createFileAtPath:filePath
-                       contents:[script dataUsingEncoding:NSUTF8StringEncoding]
-                     attributes:nil];
-
-  return [@"file://" stringByAppendingString:filePath];
+  return [NSURL fileURLWithPath:filePath].absoluteString;
 }
 
 - (void)handleActionList:(NSArray*)actionList {
   __block BOOL hasSetReplayStartTime = NO;
+  __block int64_t completionInterval = 0;
   if ([self.replayConfig enablePreDecode]) {
     [self preDecodeTemplate:_templateBundleParams];
   }
@@ -475,21 +624,22 @@ static const int kVirtual = 1 << 2;
     @try {
       [self runAction:obj
           onTestBenchComplete:^(int64_t interval) {
-            if (idx == actionList.count - 1 && self.onTestBenchComplete) {
-              __weak typeof(self) _self = self;
-              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(interval * NSEC_PER_MSEC)),
-                             dispatch_get_main_queue(), ^{
-                               if (_self) {
-                                 __strong typeof(_self) strongSelf = _self;
-                                 strongSelf.onTestBenchComplete();
-                               }
-                             });
-            }
+            completionInterval = MAX(completionInterval, interval);
           }];
     } @catch (NSException* exception) {
       NSLog(@"[TestBench][HandleAction] exception in index %ld: %@", idx, exception);
     }
   }];
+  if (self.onTestBenchComplete) {
+    __weak typeof(self) _self = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(completionInterval * NSEC_PER_MSEC)),
+                   dispatch_get_main_queue(), ^{
+                     if (_self) {
+                       __strong typeof(_self) strongSelf = _self;
+                       strongSelf.onTestBenchComplete();
+                     }
+                   });
+  }
 }
 
 - (LynxThreadStrategyForRender)getThreadStrategy:(int32_t)schemaThreadStrategy
@@ -521,6 +671,19 @@ static const int kVirtual = 1 << 2;
     default:
       return LynxViewSizeModeMax;
   }
+}
+
+- (BOOL)shouldApplyReplayViewportWithWidth:(CGFloat)width
+                                    height:(CGFloat)height
+                                 widthMode:(LynxViewSizeMode)widthMode
+                                heightMode:(LynxViewSizeMode)heightMode {
+  if (widthMode == LynxViewSizeModeExact && width <= 0) {
+    return NO;
+  }
+  if (heightMode == LynxViewSizeModeExact && height <= 0) {
+    return NO;
+  }
+  return YES;
 }
 
 - (void)preDecodeTemplate:(NSDictionary*)params {
@@ -565,10 +728,6 @@ static const int kVirtual = 1 << 2;
   if ([params objectForKey:@"threadStrategy"]) {
     _threadStrategyData = params;
     return;
-  } else {
-    if (!_threadStrategyData && _lynxView == nil) {
-      return;
-    }
   }
 
   CGFloat preferredLayoutHeight = [params[@"preferredLayoutHeight"] floatValue];
@@ -590,6 +749,15 @@ static const int kVirtual = 1 << 2;
 
   LynxViewSizeMode widthMode = [self getViewSizeMode:[params[@"layoutWidthMode"] intValue]];
   LynxViewSizeMode heightMode = [self getViewSizeMode:[params[@"layoutHeightMode"] intValue]];
+
+  if (![self shouldApplyReplayViewportWithWidth:preferredLayoutWidth
+                                         height:preferredLayoutHeight
+                                      widthMode:widthMode
+                                     heightMode:heightMode]) {
+    NSLog(@"[TestBench] Ignore invalid replay viewport: %.1f x %.1f", preferredLayoutWidth,
+          preferredLayoutHeight);
+    return;
+  }
 
   if (_config != nil && [_config valueForKey:@"screenWidth"] != Nil &&
       [_config valueForKey:@"screenHeight"] != Nil) {
@@ -639,12 +807,13 @@ static const int kVirtual = 1 << 2;
         [builder setEnableAirStrictMode:!enableJSRuntime];
       }
 
-      builder.fetcher = strongSelf->_dynamicComponentFetcher;
+      [strongSelf configureReplayResourceFetchersForBuilder:builder];
 
       NSMutableArray* preloadJSPaths = [[NSMutableArray alloc] init];
       if (![self.replayConfig forbidTimeFreeze]) {
         [preloadJSPaths addObject:[self replayTimeEnvJScript]];
       }
+      [preloadJSPaths addObjectsFromArray:strongSelf.preloadScriptPaths ?: @[]];
       NSString* groupName = @"ark";
       if (strongSelf->_lynxGroup == nil) {
         LynxGroupOption* groupOption = [[LynxGroupOption alloc] init];
@@ -792,12 +961,12 @@ static const int kVirtual = 1 << 2;
 }
 
 - (LynxView*)buildFakeLynxView {
-  CGFloat preferredLayoutHeight = 0.0f;
-  CGFloat preferredLayoutWidth = 0.0f;
-  CGFloat preferredMaxLayoutHeight = 0.0f;
-  CGFloat preferredMaxLayoutWidth = 0.0f;
+  CGFloat preferredLayoutHeight = _screenSize.height;
+  CGFloat preferredLayoutWidth = _screenSize.width;
+  CGFloat preferredMaxLayoutHeight = _screenSize.height;
+  CGFloat preferredMaxLayoutWidth = _screenSize.width;
 
-  LynxViewSizeMode widthMode = [self getViewSizeMode:0];
+  LynxViewSizeMode widthMode = [self getViewSizeMode:1];
   LynxViewSizeMode heightMode = [self getViewSizeMode:1];
   LynxView* lynxView = [[LynxView alloc] initWithBuilderBlock:^(LynxViewBuilder* builder) {
     builder.config = [[LynxConfig alloc] initWithProvider:LynxConfig.globalConfig.templateProvider];
@@ -818,12 +987,13 @@ static const int kVirtual = 1 << 2;
       [builder setEnableAirStrictMode:!enableJSRuntime];
     }
 
-    builder.fetcher = self->_dynamicComponentFetcher;
+    [self configureReplayResourceFetchersForBuilder:builder];
 
     NSMutableArray* preloadJSPaths = [[NSMutableArray alloc] init];
     if (![self.replayConfig forbidTimeFreeze]) {
       [preloadJSPaths addObject:[self replayTimeEnvJScript]];
     }
+    [preloadJSPaths addObjectsFromArray:self.preloadScriptPaths ?: @[]];
     NSString* groupName = @"ark";
     if (self->_lynxGroup == nil) {
       LynxGroupOption* groupOption = [[LynxGroupOption alloc] init];

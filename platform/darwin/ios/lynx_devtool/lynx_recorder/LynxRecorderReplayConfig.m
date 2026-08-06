@@ -20,6 +20,10 @@
                                                               forKey:@"heightLimit"
                                                         defaultValue:NO];
 
+    _edgeToEdge = [LynxRecorderURLAnalyzer getQueryBooleanParameter:baseURL
+                                                             forKey:@"edgeToEdge"
+                                                       defaultValue:NO];
+
     _enablePreDecode = [LynxRecorderURLAnalyzer getQueryBooleanParameter:baseURL
                                                                   forKey:@"enablePreDecode"
                                                             defaultValue:NO];
