@@ -177,6 +177,7 @@ if (enable_unittests) {
       "component/scrollbar/scrollbar_view_unittests.cc",
       "component/selection_handle_view_unittests.cc",
       "component/text/text_selection_unittests.cc",
+      "component/text/text_view_hit_test_unittests.cc",
       "component/video_engine_tag_priority_unittests.cc",
       "compositing/frame_builder_unittests.cc",
       "compositing/pending_container_layer_unittests.cc",
