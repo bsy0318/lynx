@@ -179,9 +179,10 @@ skt::TextStyle ParagraphBuilderSkia::TxtToSkia(const TextStyle& txt) {
     skia.addFontFeature(SkString(ff.first.c_str()), ff.second);
   }
 
-  if (!txt.font_variations.GetAxisValues().empty()) {
+  const auto font_variations = txt.GetResolvedFontVariations();
+  if (!font_variations.GetAxisValues().empty()) {
     std::vector<SkFontArguments::VariationPosition::Coordinate> coordinates;
-    for (const auto& it : txt.font_variations.GetAxisValues()) {
+    for (const auto& it : font_variations.GetAxisValues()) {
       const std::string& axis = it.first;
       if (axis.length() != 4) {
         continue;
