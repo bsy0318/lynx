@@ -7,18 +7,19 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import android.content.Context;
 import android.content.res.Resources;
 import android.os.IBinder;
 import android.util.DisplayMetrics;
 import android.view.MotionEvent;
 import android.view.View;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
+import androidx.test.platform.app.InstrumentationRegistry;
 import com.lynx.tasm.LynxView;
 import java.util.ArrayList;
 import java.util.List;
@@ -33,24 +34,22 @@ public class PointerEventDispatcherTest {
   private static final int ROOT_HEIGHT = 1200;
 
   private LynxView mLynxView;
-  private View mWindowRoot;
+  private CapturingRootView mWindowRoot;
   private PointerEventDispatcher mDispatcher;
   private List<CapturedEvent> mEvents;
 
   @Before
   public void setUp() {
     mLynxView = mock(LynxView.class);
-    mWindowRoot = mock(View.class);
-    configureWindow(mLynxView, mWindowRoot, mock(IBinder.class));
-    mEvents = captureEvents(mWindowRoot);
+    IBinder windowToken = mock(IBinder.class);
+    mWindowRoot = createWindowRoot(windowToken);
+    configureWindow(mLynxView, mWindowRoot, windowToken);
+    mEvents = mWindowRoot.getCapturedEvents();
     mDispatcher = new PointerEventDispatcher(mLynxView);
   }
 
   @Test
   public void injectsCoordinatesOutsideLynxViewThroughWindowRoot() {
-    when(mLynxView.getWidth()).thenReturn(100);
-    when(mLynxView.getHeight()).thenReturn(100);
-
     assertTrue(mDispatcher.injectPointerEvent(
         PointerEventDispatcher.POINTER_EVENT_DOWN, 300.f, 400.f, 0.f, 0.f, 7, 0, 1000));
     assertTrue(mDispatcher.injectPointerEvent(
@@ -75,7 +74,7 @@ public class PointerEventDispatcherTest {
     assertFalse(mDispatcher.injectPointerEvent(
         PointerEventDispatcher.POINTER_EVENT_DOWN, 20.f, 600.f, 0.f, 0.f, 7, 0, 1000));
 
-    verify(mWindowRoot, never()).dispatchTouchEvent(any(MotionEvent.class));
+    assertTrue(mEvents.isEmpty());
   }
 
   @Test
@@ -128,9 +127,10 @@ public class PointerEventDispatcherTest {
         PointerEventDispatcher.POINTER_EVENT_DOWN, 10.f, 20.f, 0.f, 0.f, 7, 0, 1000));
 
     LynxView nextLynxView = mock(LynxView.class);
-    View nextWindowRoot = mock(View.class);
-    configureWindow(nextLynxView, nextWindowRoot, mock(IBinder.class));
-    List<CapturedEvent> nextEvents = captureEvents(nextWindowRoot);
+    IBinder nextWindowToken = mock(IBinder.class);
+    CapturingRootView nextWindowRoot = createWindowRoot(nextWindowToken);
+    configureWindow(nextLynxView, nextWindowRoot, nextWindowToken);
+    List<CapturedEvent> nextEvents = nextWindowRoot.getCapturedEvents();
     mDispatcher.attach(nextLynxView);
 
     assertTrue(mDispatcher.injectPointerEvent(
@@ -146,12 +146,12 @@ public class PointerEventDispatcherTest {
 
   @Test
   public void returnsWindowDispatchResult() {
-    when(mWindowRoot.dispatchTouchEvent(any(MotionEvent.class))).thenReturn(false);
+    mWindowRoot.setDispatchResult(false);
 
     assertFalse(mDispatcher.injectPointerEvent(
         PointerEventDispatcher.POINTER_EVENT_DOWN, 10.f, 20.f, 0.f, 0.f, 7, 0, 1000));
 
-    when(mWindowRoot.dispatchTouchEvent(any(MotionEvent.class))).thenReturn(true);
+    mWindowRoot.setDispatchResult(true);
     assertTrue(mDispatcher.injectPointerEvent(
         PointerEventDispatcher.POINTER_EVENT_DOWN, 10.f, 20.f, 0.f, 0.f, 7, 0, 2000));
   }
@@ -162,7 +162,7 @@ public class PointerEventDispatcherTest {
 
     assertFalse(mDispatcher.injectPointerEvent(
         PointerEventDispatcher.POINTER_EVENT_DOWN, 10.f, 20.f, 0.f, 0.f, 7, 0, 1000));
-    verify(mWindowRoot, never()).dispatchTouchEvent(any(MotionEvent.class));
+    assertTrue(mEvents.isEmpty());
   }
 
   private static void configureWindow(LynxView lynxView, View root, IBinder windowToken) {
@@ -173,22 +173,44 @@ public class PointerEventDispatcherTest {
     when(lynxView.getResources()).thenReturn(resources);
     when(lynxView.getWindowToken()).thenReturn(windowToken);
     when(lynxView.getRootView()).thenReturn(root);
-    when(root.getWindowToken()).thenReturn(windowToken);
-    when(root.getWidth()).thenReturn(ROOT_WIDTH);
-    when(root.getHeight()).thenReturn(ROOT_HEIGHT);
   }
 
-  private static List<CapturedEvent> captureEvents(View root) {
-    List<CapturedEvent> events = new ArrayList<>();
-    doAnswer(invocation -> {
-      MotionEvent event = invocation.getArgument(0);
-      events.add(new CapturedEvent(event.getActionMasked(), event.getX(), event.getY(),
+  private static CapturingRootView createWindowRoot(IBinder windowToken) {
+    Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+    CapturingRootView root = new CapturingRootView(context, windowToken);
+    root.layout(0, 0, ROOT_WIDTH, ROOT_HEIGHT);
+    return root;
+  }
+
+  private static class CapturingRootView extends View {
+    private final IBinder mWindowToken;
+    private final List<CapturedEvent> mEvents = new ArrayList<>();
+    private boolean mDispatchResult = true;
+
+    CapturingRootView(Context context, IBinder windowToken) {
+      super(context);
+      mWindowToken = windowToken;
+    }
+
+    @Override
+    public IBinder getWindowToken() {
+      return mWindowToken;
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+      mEvents.add(new CapturedEvent(event.getActionMasked(), event.getX(), event.getY(),
           event.getPointerId(0), event.getDownTime()));
-      return true;
-    })
-        .when(root)
-        .dispatchTouchEvent(any(MotionEvent.class));
-    return events;
+      return mDispatchResult;
+    }
+
+    List<CapturedEvent> getCapturedEvents() {
+      return mEvents;
+    }
+
+    void setDispatchResult(boolean dispatchResult) {
+      mDispatchResult = dispatchResult;
+    }
   }
 
   private static class CapturedEvent {
