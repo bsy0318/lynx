@@ -47,9 +47,15 @@ subspec_target("devtool") {
   sources += devtool_public_headers
   public_header_files = devtool_public_headers
   if (defined(enable_rts_runtime) && enable_rts_runtime && is_debug) {
-    deps = [ "../../../../../devtool/lynx_devtool/js_debug:rts_inspector_manager_factory" ]
+    deps = [
+      "../../../../../devtool/lynx_devtool/js_debug:rts_inspector_manager_factory",
+      "../../../../devtool/lynx_devtool/input:input_types",
+    ]
   } else {
-    deps = [ "../../../../devtool/lynx_devtool/js_debug:rts_inspector_manager_factory_stub" ]
+    deps = [
+      "../../../../devtool/lynx_devtool/input:input_types",
+      "../../../../devtool/lynx_devtool/js_debug:rts_inspector_manager_factory_stub",
+    ]
   }
 }
 
@@ -238,12 +244,12 @@ subspec_target("Native") {
   }
   deps = [
     "../../../../devtool/lynx_devtool/agent",
-    "../../../../devtool/lynx_devtool/input",
-    "../../../../devtool/lynx_devtool/input:input_types",
     "../../../../devtool/lynx_devtool/base",
     "../../../../devtool/lynx_devtool/common",
     "../../../../devtool/lynx_devtool/config",
     "../../../../devtool/lynx_devtool/element",
+    "../../../../devtool/lynx_devtool/input",
+    "../../../../devtool/lynx_devtool/input:input_types",
     "../../../../devtool/lynx_devtool/message_handler",
     "../../../../devtool/lynx_devtool/recorder",
     "../../../../devtool/lynx_devtool/shared_data",

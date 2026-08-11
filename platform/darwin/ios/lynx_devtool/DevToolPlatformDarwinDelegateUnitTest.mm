@@ -7,6 +7,8 @@
 #import <UIKit/UIKit.h>
 #import <XCTest/XCTest.h>
 
+#include "devtool/lynx_devtool/input/input_event_target.h"
+
 @interface LynxEmulateTouchHelper (PointerEventInjectionTesting)
 
 - (BOOL)lynx_isPointerEventInjectionAvailable;
@@ -25,6 +27,37 @@
 
 - (BOOL)isFirstResponder {
   return YES;
+}
+
+@end
+
+@interface DevToolPointerInjectionHelper : LynxEmulateTouchHelper
+
+@property(nonatomic, assign) BOOL injectionAvailable;
+@property(nonatomic, assign) BOOL injectionResult;
+@property(nonatomic, assign) BOOL injectedOnMainThread;
+@property(nonatomic, assign) NSInteger injectionCount;
+@property(nonatomic, assign) NSInteger cancellationCount;
+
+@end
+
+@implementation DevToolPointerInjectionHelper
+
+- (BOOL)isPointerEventInjectionAvailable {
+  return self.injectionAvailable;
+}
+
+- (BOOL)injectPointerEvent:(LynxDevToolPointerEventType)type
+                 pointerId:(int32_t)pointerId
+               coordinateX:(CGFloat)x
+               coordinateY:(CGFloat)y {
+  self.injectedOnMainThread = [NSThread isMainThread];
+  self.injectionCount += 1;
+  return self.injectionResult;
+}
+
+- (void)cancelCurrentPointerSequence {
+  self.cancellationCount += 1;
 }
 
 @end
@@ -71,6 +104,21 @@
 
 namespace {
 
+lynx::devtool::input::PointerEvent MakePointerEvent(
+    lynx::devtool::input::PointerSourceType source_type,
+    lynx::devtool::input::PointerEventType event_type, float x, float y) {
+  lynx::devtool::input::PointerEvent event;
+  event.source_type = source_type;
+  event.type = event_type;
+  event.changed_pointer_id = 1;
+  lynx::devtool::input::Pointer pointer;
+  pointer.id = 1;
+  pointer.x = x;
+  pointer.y = y;
+  event.pointers.push_back(pointer);
+  return event;
+}
+
 UIWindow *MakeWindow(CGSize size) {
   UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, size.width, size.height)];
   window.hidden = NO;
@@ -106,6 +154,54 @@ UIView *WindowRootView(UIWindow *window) { return window.subviews.firstObject; }
   [platform insertText:@"b"];
 
   XCTAssertEqualObjects(textField.text, @"abc");
+}
+
+- (void)testInputEventTargetCapabilitiesFollowInternalUIKitAvailability {
+  DevToolPlatformDarwinDelegate *platform =
+      [[DevToolPlatformDarwinDelegate alloc] initWithLynxView:nil];
+  DevToolPointerInjectionHelper *helper =
+      [[DevToolPointerInjectionHelper alloc] initWithLynxView:nil];
+  helper.injectionAvailable = YES;
+  [platform setValue:helper forKey:@"touchHelper"];
+
+  std::shared_ptr<lynx::devtool::input::InputEventTarget> target =
+      [platform getNativePtr]->GetInputEventTarget();
+  XCTAssertNotEqual(target, nullptr);
+  auto capabilities = target->GetPointerCapabilities();
+  XCTAssertEqual(capabilities.default_source_type, lynx::devtool::input::PointerSourceType::kTouch);
+  XCTAssertTrue(capabilities.supports_touch);
+  XCTAssertFalse(capabilities.supports_mouse);
+
+  helper.injectionAvailable = NO;
+  capabilities = target->GetPointerCapabilities();
+  XCTAssertEqual(capabilities.default_source_type,
+                 lynx::devtool::input::PointerSourceType::kDefault);
+  XCTAssertFalse(capabilities.supports_touch);
+  XCTAssertFalse(capabilities.supports_mouse);
+}
+
+- (void)testInputEventTargetRejectsInvalidSourceAndMultiplePointers {
+  DevToolPlatformDarwinDelegate *platform =
+      [[DevToolPlatformDarwinDelegate alloc] initWithLynxView:nil];
+  DevToolPointerInjectionHelper *helper =
+      [[DevToolPointerInjectionHelper alloc] initWithLynxView:nil];
+  helper.injectionAvailable = YES;
+  helper.injectionResult = YES;
+  [platform setValue:helper forKey:@"touchHelper"];
+  auto target = [platform getNativePtr]->GetInputEventTarget();
+
+  auto event = MakePointerEvent(lynx::devtool::input::PointerSourceType::kMouse,
+                                lynx::devtool::input::PointerEventType::kDown, 10.f, 20.f);
+  XCTAssertFalse(target->InjectPointerEvent(event));
+
+  event.source_type = lynx::devtool::input::PointerSourceType::kTouch;
+  lynx::devtool::input::Pointer secondPointer;
+  secondPointer.id = 2;
+  secondPointer.x = 30.f;
+  secondPointer.y = 40.f;
+  event.pointers.push_back(secondPointer);
+  XCTAssertFalse(target->InjectPointerEvent(event));
+  XCTAssertEqual(helper.injectionCount, 0);
 }
 
 - (void)testPointerHelperRejectsNilWindowAndWindowBoundary {
@@ -211,6 +307,40 @@ UIView *WindowRootView(UIWindow *window) { return window.subviews.firstObject; }
                                  pointerId:2
                                coordinateX:10
                                coordinateY:10]);
+}
+
+- (void)testDelegateDeallocCancelsActivePointerSequence {
+  DevToolPointerInjectionHelper *helper =
+      [[DevToolPointerInjectionHelper alloc] initWithLynxView:nil];
+  @autoreleasepool {
+    DevToolPlatformDarwinDelegate *platform =
+        [[DevToolPlatformDarwinDelegate alloc] initWithLynxView:nil];
+    [platform setValue:helper forKey:@"touchHelper"];
+    platform = nil;
+  }
+  XCTAssertEqual(helper.cancellationCount, 1);
+}
+
+- (void)testInputEventTargetRoutesInjectionToMainThread {
+  DevToolPlatformDarwinDelegate *platform =
+      [[DevToolPlatformDarwinDelegate alloc] initWithLynxView:nil];
+  DevToolPointerInjectionHelper *helper =
+      [[DevToolPointerInjectionHelper alloc] initWithLynxView:nil];
+  helper.injectionAvailable = YES;
+  helper.injectionResult = YES;
+  [platform setValue:helper forKey:@"touchHelper"];
+  auto target = [platform getNativePtr]->GetInputEventTarget();
+  auto event = MakePointerEvent(lynx::devtool::input::PointerSourceType::kTouch,
+                                lynx::devtool::input::PointerEventType::kDown, 10.f, 20.f);
+  XCTestExpectation *expectation = [self expectationWithDescription:@"main thread injection"];
+
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+    XCTAssertTrue(target->InjectPointerEvent(event));
+    XCTAssertTrue(helper.injectedOnMainThread);
+    [expectation fulfill];
+  });
+
+  [self waitForExpectations:@[ expectation ] timeout:2];
 }
 
 @end

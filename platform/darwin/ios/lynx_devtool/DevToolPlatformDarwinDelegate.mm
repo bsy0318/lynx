@@ -2,6 +2,7 @@
 // Licensed under the Apache License Version 2.0 that can be found in the
 // LICENSE file in the root directory of this source tree.
 #import <LynxDevtool/DevToolPlatformDarwinDelegate.h>
+#include <cmath>
 #include <vector>
 
 #import <BaseDevTool/DevToolToast.h>
@@ -21,17 +22,106 @@
 
 #include "devtool/base_devtool/native/public/devtool_status.h"
 #include "devtool/lynx_devtool/agent/devtool_platform_facade.h"
+#include "devtool/lynx_devtool/input/input_event_target.h"
 
 @interface DevToolPlatformDarwinDelegate ()
 - (nullable UIView*)firstResponderInView:(nullable UIView*)view;
+- (BOOL)isPointerEventInjectionAvailable;
+- (BOOL)injectPointerEvent:(const lynx::devtool::input::PointerEvent&)event;
 @end
 
 #pragma mark - DevToolPlatformDarwin
 namespace lynx {
 namespace devtool {
+namespace {
+
+bool ToDarwinPointerEventType(input::PointerEventType type,
+                              LynxDevToolPointerEventType* darwin_type) {
+  if (darwin_type == nullptr) {
+    return false;
+  }
+  switch (type) {
+    case input::PointerEventType::kDown:
+      *darwin_type = LynxDevToolPointerEventTypeDown;
+      return true;
+    case input::PointerEventType::kMove:
+      *darwin_type = LynxDevToolPointerEventTypeMove;
+      return true;
+    case input::PointerEventType::kUp:
+      *darwin_type = LynxDevToolPointerEventTypeUp;
+      return true;
+    case input::PointerEventType::kCancel:
+      *darwin_type = LynxDevToolPointerEventTypeCancel;
+      return true;
+    case input::PointerEventType::kScroll:
+      return false;
+  }
+  return false;
+}
+
+class DarwinInputEventTarget final : public input::InputEventTarget {
+ public:
+  explicit DarwinInputEventTarget(DevToolPlatformDarwinDelegate* delegate) : delegate_(delegate) {}
+
+  input::PointerCapabilities GetPointerCapabilities() const override {
+    input::PointerCapabilities capabilities;
+    __strong typeof(delegate_) delegate = delegate_;
+    if (delegate == nil) {
+      return capabilities;
+    }
+
+    __block BOOL available = NO;
+    void (^check_capability)(void) = ^{
+      available = [delegate isPointerEventInjectionAvailable];
+    };
+    if ([NSThread isMainThread]) {
+      check_capability();
+    } else {
+      dispatch_sync(dispatch_get_main_queue(), check_capability);
+    }
+    if (available) {
+      capabilities.default_source_type = input::PointerSourceType::kTouch;
+      capabilities.supports_touch = true;
+    }
+    return capabilities;
+  }
+
+  bool InjectPointerEvent(const input::PointerEvent& event) override {
+    if (event.source_type != input::PointerSourceType::kTouch || event.pointers.size() != 1) {
+      return false;
+    }
+    const input::Pointer* pointer = event.FindPointer(event.changed_pointer_id);
+    if (pointer == nullptr || !std::isfinite(pointer->x) || !std::isfinite(pointer->y)) {
+      return false;
+    }
+
+    __strong typeof(delegate_) delegate = delegate_;
+    if (delegate == nil) {
+      return false;
+    }
+    __block BOOL injected = NO;
+    void (^inject)(void) = ^{
+      injected = [delegate injectPointerEvent:event];
+    };
+    if ([NSThread isMainThread]) {
+      inject();
+    } else {
+      dispatch_sync(dispatch_get_main_queue(), inject);
+    }
+    return injected;
+  }
+
+ private:
+  __weak DevToolPlatformDarwinDelegate* delegate_;
+};
+
+}  // namespace
+
 class DevToolPlatformDarwin : public DevToolPlatformFacade {
  public:
-  DevToolPlatformDarwin(DevToolPlatformDarwinDelegate* darwin) { _darwin = darwin; }
+  explicit DevToolPlatformDarwin(DevToolPlatformDarwinDelegate* darwin) : _darwin(darwin) {
+    SetInputEventTarget(std::make_shared<DarwinInputEventTarget>(darwin));
+  }
 
   int FindNodeIdForLocation(float x, float y, std::string screen_shot_mode) override {
     __strong typeof(_darwin) darwin = _darwin;
@@ -354,6 +444,10 @@ class DevToolPlatformDarwin : public DevToolPlatformFacade {
   return self;
 }
 
+- (void)dealloc {
+  [_touchHelper cancelCurrentPointerSequence];
+}
+
 - (void)attachLynxUIOwner:(nullable LynxUIOwner*)owner {
   [_uiTreeHelper attachLynxUIOwner:owner];
 }
@@ -605,6 +699,26 @@ class DevToolPlatformDarwin : public DevToolPlatformFacade {
       [firstResponder respondsToSelector:@selector(insertText:)]) {
     [(id<UITextInput>)firstResponder insertText:text];
   }
+}
+
+- (BOOL)isPointerEventInjectionAvailable {
+  return [_touchHelper isPointerEventInjectionAvailable];
+}
+
+- (BOOL)injectPointerEvent:(const lynx::devtool::input::PointerEvent&)event {
+  if (![NSThread isMainThread]) {
+    return NO;
+  }
+
+  const lynx::devtool::input::Pointer* pointer = event.FindPointer(event.changed_pointer_id);
+  LynxDevToolPointerEventType darwinType;
+  if (pointer == nullptr || !lynx::devtool::ToDarwinPointerEventType(event.type, &darwinType)) {
+    return NO;
+  }
+  return [_touchHelper injectPointerEvent:darwinType
+                                pointerId:event.changed_pointer_id
+                              coordinateX:pointer->x
+                              coordinateY:pointer->y];
 }
 
 - (nullable UIView*)firstResponderInView:(nullable UIView*)view {
