@@ -30,8 +30,9 @@
 #elif OS_LINUX
 #if defined(ENABLE_SOFTWARE_RENDERING)
 #include "clay/gfx/shared_image/angle_software_shm_image_backing.h"
-#endif
+#else
 #include "clay/gfx/shared_image/epoxy_shm_image_backing.h"
+#endif
 #endif
 
 namespace clay {
@@ -128,15 +129,17 @@ fml::RefPtr<SharedImageBacking> SharedImageBacking::Create(
                                                         gfx_handle);
   }
 #elif OS_LINUX
+#if defined(ENABLE_SOFTWARE_RENDERING)
+  if (type == BackingType::kAngleShmImage) {
+    return fml::MakeRefCounted<AngleSoftwareShmImageBacking>(pixel_format,
+                                                             size);
+  }
+#else
   if (type == BackingType::kShmImage) {
     return fml::MakeRefCounted<EpoxyShmImageBacking>(pixel_format, size,
                                                      std::nullopt);
-  } else if (type == BackingType::kAngleShmImage) {
-#if defined(ENABLE_SOFTWARE_RENDERING)
-    return fml::MakeRefCounted<AngleSoftwareShmImageBacking>(pixel_format,
-                                                             size);
-#endif
   }
+#endif
 #endif
 
   FML_LOG(ERROR) << "Unable to Create SharedImageBacking with type: "

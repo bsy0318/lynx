@@ -50,12 +50,18 @@ source_set("shared_image") {
   }
 
   if (enable_skity) {
+    deps += [ "../skity" ]
     if (is_android || is_win) {
       sources += [
         "skity_gl_image_representation.cc",
         "skity_gl_image_representation.h",
         "utils/gl_texture_converter.cc",
         "utils/gl_texture_converter.h",
+      ]
+    } else if (is_linux) {
+      sources += [
+        "skity_gl_image_representation.cc",
+        "skity_gl_image_representation.h",
       ]
     } else if (is_ios || is_mac) {
       sources += [
@@ -188,27 +194,41 @@ source_set("shared_image") {
 
   if (is_linux) {
     sources += [
-      "epoxy_shm_image_backing.cc",
-      "epoxy_shm_image_backing.h",
-      "epoxy_shm_image_representation.cc",
-      "epoxy_shm_image_representation.h",
       "linux_shm_image_representation.cc",
       "linux_shm_image_representation.h",
     ]
 
     if (enable_software_rendering) {
       sources += [
+        "angle_software_gl_image_representation.cc",
+        "angle_software_gl_image_representation.h",
         "angle_software_shm_image_backing.cc",
         "angle_software_shm_image_backing.h",
         "angle_sw_shm_image_representation.cc",
         "angle_sw_shm_image_representation.h",
-        "skia_shm_image_representation.cc",
-        "skia_shm_image_representation.h",
       ]
+      if (!enable_skity) {
+        sources += [
+          "skia_shm_image_representation.cc",
+          "skia_shm_image_representation.h",
+        ]
+      } else {
+        sources += [
+          "skity_shm_image_representation.cc",
+          "skity_shm_image_representation.h",
+        ]
+      }
       deps += [
         "//third_party/angle:includes",
         "//third_party/angle:libEGL_static",
         "//third_party/angle:libGLESv2_static",
+      ]
+    } else {
+      sources += [
+        "epoxy_shm_image_backing.cc",
+        "epoxy_shm_image_backing.h",
+        "epoxy_shm_image_representation.cc",
+        "epoxy_shm_image_representation.h",
       ]
     }
     deps += [ "../../fml:fml" ]

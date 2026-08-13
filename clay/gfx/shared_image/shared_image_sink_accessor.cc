@@ -105,6 +105,9 @@ SharedImageSinkAccessor::AcquireBack(const skity::Vec2& size) {
     return std::make_tuple(nullptr, 0);
   }
   back_repr_ = GetRepresentation(backing.get());
+  if (!back_repr_) {
+    return std::make_tuple(nullptr, 0);
+  }
   back_repr_->ConsumeFence(backing->GetFenceSync());
   return std::make_tuple(back_repr_, buffer_age);
 }
