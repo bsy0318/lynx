@@ -19,6 +19,14 @@ InspectorOwnerEmbedderHarmony::InspectorOwnerEmbedderHarmony(napi_env env,
 
 InspectorOwnerEmbedderHarmony::~InspectorOwnerEmbedderHarmony() { Destroy(); }
 
+void InspectorOwnerEmbedderHarmony::SetUITaskRunner(
+    const fml::RefPtr<fml::TaskRunner>& task_runner) {
+  InspectorOwnerEmbedder::SetUITaskRunner(task_runner);
+  if (input_event_target_) {
+    input_event_target_->SetUITaskRunner(task_runner);
+  }
+}
+
 void InspectorOwnerEmbedderHarmony::OnConsoleMessage(
     const std::string& message) {
   auto ui_task_runner = GetUITaskRunner();
@@ -95,6 +103,7 @@ void InspectorOwnerEmbedderHarmony::OnDevToolPlatformFacadeReady(
     input_event_target_ = std::make_shared<HarmonyInputEventTarget>(
         CreateHarmonyTouchEventInjector());
   }
+  input_event_target_->SetUITaskRunner(GetUITaskRunner());
   facade->SetInputEventTarget(input_event_target_);
 }
 

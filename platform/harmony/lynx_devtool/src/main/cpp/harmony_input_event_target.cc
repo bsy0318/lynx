@@ -15,6 +15,8 @@ namespace lynx {
 namespace devtool {
 namespace {
 
+constexpr int32_t kPrimaryTouchPointerId = 0;
+
 int64_t NowUs() {
   return fml::TimePoint::Now().ToEpochDelta().ToMicroseconds();
 }
@@ -154,6 +156,35 @@ bool HarmonyInputEventTarget::InjectPointerEvent(
   return true;
 }
 
+void HarmonyInputEventTarget::WaitForInputProcessed(
+    std::function<void(bool)> callback) {
+  if (!callback) {
+    return;
+  }
+
+  fml::RefPtr<fml::TaskRunner> ui_task_runner;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ui_task_runner = ui_task_runner_;
+  }
+  if (!ui_task_runner) {
+    callback(false);
+    return;
+  }
+
+  // Harmony injects touch events through the window input pipeline. Posting
+  // behind the injection avoids completing the CDP request in the injection
+  // call stack while preserving InputEventTarget's same-sequence contract.
+  ui_task_runner->PostTask(
+      [callback = std::move(callback)]() mutable { callback(true); });
+}
+
+void HarmonyInputEventTarget::SetUITaskRunner(
+    const fml::RefPtr<fml::TaskRunner>& task_runner) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  ui_task_runner_ = task_runner;
+}
+
 void HarmonyInputEventTarget::UpdateWindowInfo(
     const HarmonyInputWindowInfo& window_info) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -200,7 +231,10 @@ bool HarmonyInputEventTarget::BuildTouchEventLocked(
   touch_event->action = action;
   touch_event->window_id = window_info_.window_id;
   touch_event->display_id = window_info_.display_id;
-  touch_event->pointer_id = pointer->id;
+  // Harmony treats touch pointer id 0 as the primary input. Synthetic gestures
+  // use ids in [1, 31] for cross-platform uniqueness, so normalize the
+  // platform finger id for this single-touch adapter.
+  touch_event->pointer_id = kPrimaryTouchPointerId;
   touch_event->window_x = window_x;
   touch_event->window_y = window_y;
   touch_event->display_x = display_x;

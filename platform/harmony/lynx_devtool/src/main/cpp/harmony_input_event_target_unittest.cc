@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 
+#include "base/include/fml/message_loop.h"
 #include "third_party/googletest/googletest/include/gtest/gtest.h"
 
 namespace lynx {
@@ -91,13 +92,46 @@ TEST(HarmonyInputEventTargetTest, ConvertsCssPixelsAndInjectsSequence) {
   EXPECT_EQ(injector->events[0].action, HarmonyTouchEventAction::kDown);
   EXPECT_EQ(injector->events[0].window_id, 7);
   EXPECT_EQ(injector->events[0].display_id, 3);
-  EXPECT_EQ(injector->events[0].pointer_id, 5);
+  EXPECT_EQ(injector->events[0].pointer_id, 0);
   EXPECT_EQ(injector->events[0].window_x, 20);
   EXPECT_EQ(injector->events[0].window_y, 40);
   EXPECT_EQ(injector->events[0].display_x, 120);
   EXPECT_EQ(injector->events[0].display_y, 240);
   EXPECT_EQ(injector->events[1].action, HarmonyTouchEventAction::kMove);
   EXPECT_EQ(injector->events[2].action, HarmonyTouchEventAction::kUp);
+}
+
+TEST(HarmonyInputEventTargetTest, WaitsAsynchronouslyForInputProcessing) {
+  auto injector = std::make_shared<RecordingHarmonyTouchEventInjector>();
+  HarmonyInputEventTarget target(injector);
+  auto& message_loop = fml::MessageLoop::EnsureInitializedForCurrentThread();
+  target.SetUITaskRunner(message_loop.GetTaskRunner());
+
+  bool callback_called = false;
+  bool callback_result = false;
+  target.WaitForInputProcessed([&](bool success) {
+    callback_called = true;
+    callback_result = success;
+    EXPECT_TRUE(message_loop.GetTaskRunner()->RunsTasksOnCurrentThread());
+  });
+
+  EXPECT_FALSE(callback_called);
+  message_loop.RunExpiredTasksNow();
+  EXPECT_TRUE(callback_called);
+  EXPECT_TRUE(callback_result);
+}
+
+TEST(HarmonyInputEventTargetTest, FailsInputProcessingWithoutUITaskRunner) {
+  auto injector = std::make_shared<RecordingHarmonyTouchEventInjector>();
+  HarmonyInputEventTarget target(injector);
+
+  bool callback_called = false;
+  target.WaitForInputProcessed([&](bool success) {
+    callback_called = true;
+    EXPECT_FALSE(success);
+  });
+
+  EXPECT_TRUE(callback_called);
 }
 
 TEST(HarmonyInputEventTargetTest, RejectsUnsupportedAndOutOfBoundsEvents) {

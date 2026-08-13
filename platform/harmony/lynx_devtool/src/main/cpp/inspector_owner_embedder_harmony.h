@@ -23,6 +23,8 @@ class InspectorOwnerEmbedderHarmony : public InspectorOwnerEmbedder {
   InspectorOwnerEmbedderHarmony(napi_env env, napi_ref ref);
   ~InspectorOwnerEmbedderHarmony() override;
 
+  void SetUITaskRunner(
+      const fml::RefPtr<fml::TaskRunner>& task_runner) override;
   void OnConsoleMessage(const std::string& message) override;
   void OnConsoleObject(const std::string& detail, int callback_id) override;
 

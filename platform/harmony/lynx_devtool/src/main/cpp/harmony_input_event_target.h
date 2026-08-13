@@ -6,9 +6,11 @@
 #define PLATFORM_HARMONY_LYNX_DEVTOOL_SRC_MAIN_CPP_HARMONY_INPUT_EVENT_TARGET_H_
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 
+#include "base/include/fml/task_runner.h"
 #include "devtool/lynx_devtool/input/input_event_target.h"
 
 namespace lynx {
@@ -63,7 +65,9 @@ class HarmonyInputEventTarget final : public input::InputEventTarget {
 
   input::PointerCapabilities GetPointerCapabilities() const override;
   bool InjectPointerEvent(const input::PointerEvent& event) override;
+  void WaitForInputProcessed(std::function<void(bool)> callback) override;
 
+  void SetUITaskRunner(const fml::RefPtr<fml::TaskRunner>& task_runner);
   void UpdateWindowInfo(const HarmonyInputWindowInfo& window_info);
   void InvalidateWindow();
 
@@ -88,6 +92,7 @@ class HarmonyInputEventTarget final : public input::InputEventTarget {
   mutable std::mutex mutex_;
   HarmonyInputWindowInfo window_info_;
   ActivePointer active_pointer_;
+  fml::RefPtr<fml::TaskRunner> ui_task_runner_;
 };
 
 }  // namespace devtool
