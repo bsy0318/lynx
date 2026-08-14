@@ -138,6 +138,7 @@ class EditableView : public WithTypeInfo<EditableView, BaseView>,
   void UpdateEditingState(std::string text, TextSelection selection,
                           TextRange composing, Affinity affinity) override;
   void PerformAction() override;
+  bool PerformSelector(const std::string& selector) override;
 
   Transform ToGlobalTransform() const;
 
@@ -226,6 +227,8 @@ class EditableView : public WithTypeInfo<EditableView, BaseView>,
   void DoBackspace();
   void DoDelete();
   void MoveCaret(KeyCode keycode);
+  void MoveSelection(size_t position, bool modify_selection);
+  void DeleteSelectionTo(size_t position);
 
   void ToggleCaret();
   void TwinkleCaretPeriodically();
