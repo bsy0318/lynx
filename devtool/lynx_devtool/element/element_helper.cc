@@ -16,6 +16,7 @@
 #include "core/renderer/css/css_decoder.h"
 #include "core/renderer/css/css_parser_token.h"
 #include "core/renderer/css/css_property.h"
+#include "core/renderer/css/css_utils.h"
 #include "core/renderer/css/ng/media_query/media_query_evaluator.h"
 #include "core/renderer/css/ng/supports/supports_evaluator.h"
 #include "core/renderer/css/parser/css_string_parser.h"
@@ -95,70 +96,6 @@ Element* ElementHelper::GetPreviousNode(Element* ptr) {
 }
 
 namespace {
-
-bool StripTrailingImportantForDevtool(std::string_view value,
-                                      std::string* stripped_value) {
-  constexpr char kImportant[] = "important";
-  constexpr size_t kImportantLen = sizeof(kImportant) - 1;
-
-  // Step 1: Skip trailing whitespace after "important" (if any).
-  size_t end = value.size();
-  while (end > 0 && base::IsHTMLSpace(value[end - 1])) {
-    --end;
-  }
-
-  // After trimming trailing whitespace, the remaining string is too short to
-  // contain both '!' and "important" (minimum 10 chars). Not !important.
-  if (end < kImportantLen + 1) {
-    stripped_value->assign(value.data(), value.size());
-    return false;
-  }
-
-  // Step 2: Check if the last 9 characters spell "important"
-  // (case-insensitive).
-  for (size_t i = 0; i < kImportantLen; ++i) {
-    if (static_cast<char>(value[end - kImportantLen + i] | 0x20) !=
-        kImportant[i]) {
-      // The suffix is not "important" (e.g., "100px", "red"). Not !important.
-      stripped_value->assign(value.data(), value.size());
-      return false;
-    }
-  }
-
-  // Step 3: Skip optional whitespace between '!' and "important"
-  // (CSS allows "! important").
-  size_t bang_pos = end - kImportantLen;
-  while (bang_pos > 0 && base::IsHTMLSpace(value[bang_pos - 1])) {
-    --bang_pos;
-  }
-
-  // After skipping middle whitespace, there must be a '!' before "important".
-  // If we hit the start of string or the char is not '!', this is not
-  // !important (e.g., "important" without '!').
-  if (bang_pos == 0 || value[bang_pos - 1] != '!') {
-    stripped_value->assign(value.data(), value.size());
-    return false;
-  }
-
-  // Step 4: Skip optional whitespace between the value and '!'.
-  size_t value_end = bang_pos - 1;
-  while (value_end > 0 && base::IsHTMLSpace(value[value_end - 1])) {
-    --value_end;
-  }
-
-  // There must be an actual value before '!'. If value_end reached 0, the
-  // entire string was just whitespace + !important (e.g., "!important"),
-  // which is invalid / meaningless.
-  if (value_end == 0) {
-    stripped_value->assign(value.data(), value.size());
-    return false;
-  }
-
-  // All checks passed: non-empty value + optional ws + '!' + optional ws +
-  // "important" + optional trailing ws.
-  stripped_value->assign(value.data(), value_end);
-  return true;
-}
 
 bool HasCSSVariableTokenForDevtool(
     std::string_view value, const lynx::tasm::CSSParserConfigs& configs) {
@@ -276,9 +213,11 @@ void SyncInlineStyleSourceForNewPipeline(
       continue;
     }
     const auto& property = it->second;
-    std::string stripped_value;
-    const bool important =
-        StripTrailingImportantForDevtool(property.value_, &stripped_value);
+    const std::string stripped_value(
+        lynx::tasm::MaybeStripImportantAsView(property.value_));
+    const bool has_important_suffix =
+        stripped_value.size() != property.value_.size();
+    const bool important = property.important_ || has_important_suffix;
     const bool is_custom_property = lynx::tasm::CSSProperty::IsCustomProperty(
         property.name_.c_str(), static_cast<uint32_t>(property.name_.length()));
     if (property.disabled_) {
@@ -299,9 +238,11 @@ void SyncInlineStyleSourceForNewPipeline(
   if (style_sheet.property_order_.empty()) {
     for (const auto& property : style_sheet.css_properties_) {
       const auto& p = property.second;
-      std::string stripped_value;
-      const bool important =
-          StripTrailingImportantForDevtool(p.value_, &stripped_value);
+      const std::string stripped_value(
+          lynx::tasm::MaybeStripImportantAsView(p.value_));
+      const bool has_important_suffix =
+          stripped_value.size() != p.value_.size();
+      const bool important = p.important_ || has_important_suffix;
       const bool is_custom_property = lynx::tasm::CSSProperty::IsCustomProperty(
           p.name_.c_str(), static_cast<uint32_t>(p.name_.length()));
       if (p.disabled_) {
@@ -338,12 +279,10 @@ void AddPropertyDetailToStyleSources(Element* element,
     return;
   }
 
-  std::string value;
-  const bool important =
-      StripTrailingImportantForDevtool(property.value_, &value);
-  if (!important) {
-    value = property.value_;
-  }
+  const std::string value(
+      lynx::tasm::MaybeStripImportantAsView(property.value_));
+  const bool has_important_suffix = value.size() != property.value_.size();
+  const bool important = property.important_ || has_important_suffix;
   const bool is_custom_property = lynx::tasm::CSSProperty::IsCustomProperty(
       property.name_.c_str(), static_cast<uint32_t>(property.name_.length()));
 
@@ -439,9 +378,10 @@ void CollectCustomPropertiesForLegacyPipeline(
       return;
     }
 
-    std::string value;
-    const bool important =
-        StripTrailingImportantForDevtool(property.value_, &value);
+    const std::string value(
+        lynx::tasm::MaybeStripImportantAsView(property.value_));
+    const bool has_important_suffix = value.size() != property.value_.size();
+    const bool important = property.important_ || has_important_suffix;
     auto& variables = important ? important_variables : normal_variables;
     variables.insert_or_assign(
         lynx::base::String(property.name_.c_str(),
@@ -929,11 +869,18 @@ Json::Value ElementHelper::GetInlineStyleOfNode(Element* ptr) {
           CSSPropertyDetail& css_property_detail = it->second;
           css_property_detail.looped_ = true;
           temp["name"] = name;
+          std::string value;
           if (name == "animation") {
-            temp["value"] =
-                NormalizeAnimationString(css_property_detail.value_);
+            value = NormalizeAnimationString(css_property_detail.value_);
           } else {
-            temp["value"] = css_property_detail.value_;
+            value = css_property_detail.value_;
+          }
+          temp["value"] = CSSPropertyValueForProtocol(
+              value, css_property_detail.important_);
+          if (css_property_detail.important_) {
+            temp["important"] = true;
+          } else {
+            temp.removeMember("important");
           }
           temp["implicit"] = css_property_detail.implicit_;
           temp["disabled"] = css_property_detail.disabled_;
@@ -1251,7 +1198,13 @@ Json::Value ElementHelper::GetStyleSheetAsText(
       CSSPropertyDetail& css_property_detail = it->second;
       css_property_detail.looped_ = true;
       property["name"] = css_property_detail.name_;
-      property["value"] = css_property_detail.value_;
+      property["value"] = CSSPropertyValueForProtocol(
+          css_property_detail.value_, css_property_detail.important_);
+      if (css_property_detail.important_) {
+        property["important"] = true;
+      } else {
+        property.removeMember("important");
+      }
       if (css_property_detail.disabled_) {
         property.removeMember("implicit");
         property["disabled"] = css_property_detail.disabled_;
@@ -1359,7 +1312,10 @@ void ElementHelper::SetSelectorStyleTexts(Element* root, Element* ptr,
           style_root, cur_style_sheet);
       source_token = ResolveMatchedSourceTokenForDevTool(
           ptr_vec, selector_name, cur_style_sheet.position_, source_token);
-      if (enable_new_styling_pipeline) {
+      // Source-backed edits must be recascaded by StyleResolver in both
+      // pipelines. The legacy inspector replay does not preserve !important
+      // or cascade-layer priority.
+      if (enable_new_styling_pipeline || source_token != nullptr) {
         ElementInspector::EraseStyleSheetSourceToken(style_root,
                                                      cur_style_sheet);
         iter->second = modified_style_sheet;
@@ -1382,14 +1338,6 @@ void ElementHelper::SetSelectorStyleTexts(Element* root, Element* ptr,
       } else {
         ElementInspector::SetStyleSheetByName(ptr, selector_name,
                                               modified_style_sheet);
-        if (source_token != nullptr) {
-          SyncSelectorStyleTokenForDevTool(root ? root : ptr, source_token,
-                                           modified_style_sheet);
-          ElementInspector::EraseStyleSheetSourceToken(style_root,
-                                                       cur_style_sheet);
-          ElementInspector::RecordStyleSheetSourceToken(
-              style_root, modified_style_sheet, source_token);
-        }
         ptr_vec = ElementInspector::SelectElementAll(root ? root : ptr,
                                                      selector_name);
         CSSVariableSnapshot variable_snapshot;

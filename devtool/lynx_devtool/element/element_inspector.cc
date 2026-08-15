@@ -276,6 +276,17 @@ std::string GetAuthoredVariableValue(const lynx::tasm::CSSValue& value) {
       authored_value, value.GetDefaultValueMapOpt(), value.GetDefaultValue());
 }
 
+void RestoreAuthoredVariableValues(
+    const StyleMap& style_map,
+    std::unordered_map<std::string, std::string>* serialized_styles) {
+  for (const auto& [id, value] : style_map) {
+    if (value.IsVariable()) {
+      (*serialized_styles)[CSSProperty::GetPropertyName(id).str()] =
+          GetAuthoredVariableValue(value);
+    }
+  }
+}
+
 void RebuildInspectorStyleSheetText(InspectorStyleSheet* style_sheet) {
   if (style_sheet == nullptr || style_sheet->property_order_.empty()) {
     return;
@@ -319,26 +330,32 @@ void NormalizeAuthoredVariableProperties(
   }
 
   bool changed = false;
-  for (const auto& [id, value] : token->GetAttributes()) {
-    if (!value.IsVariable()) {
-      continue;
-    }
-
-    const auto name = CSSProperty::GetPropertyName(id).str();
-    const auto& raw_authored_value = value.AsStdString();
-    const auto authored_value = GetAuthoredVariableValue(value);
-    auto range = inspector_style_sheet->css_properties_.equal_range(name);
-    for (auto it = range.first; it != range.second; ++it) {
-      auto& property = it->second;
-      if (property.value_ != raw_authored_value ||
-          property.value_.find("{{") == std::string::npos) {
+  auto normalize = [&](const StyleMap& styles, bool important) {
+    for (const auto& [id, value] : styles) {
+      if (!value.IsVariable()) {
         continue;
       }
-      property.value_ = authored_value;
-      property.text_ = property.name_ + ":" + authored_value + ";";
-      changed = true;
+
+      const auto name = CSSProperty::GetPropertyName(id).str();
+      const auto& raw_authored_value = value.AsStdString();
+      const auto authored_value = GetAuthoredVariableValue(value);
+      auto range = inspector_style_sheet->css_properties_.equal_range(name);
+      for (auto it = range.first; it != range.second; ++it) {
+        auto& property = it->second;
+        if (property.important_ != important ||
+            property.value_ != raw_authored_value ||
+            property.value_.find("{{") == std::string::npos) {
+          continue;
+        }
+        property.value_ = authored_value;
+        property.text_ = property.name_ + ":" + authored_value +
+                         (important ? " !important;" : ";");
+        changed = true;
+      }
     }
-  }
+  };
+  normalize(token->GetAttributes(), false);
+  normalize(token->GetImportantAttributes(), true);
 
   if (changed) {
     RebuildInspectorStyleSheetText(inspector_style_sheet);
@@ -444,6 +461,66 @@ void ResolveCSSVariablesForDevTool(
     }
   }
   styles = std::move(resolved_styles);
+}
+
+lynx::devtool::InspectorStyleSheet InitStyleSheet(
+    Element* element, int start_line, std::string name,
+    std::unordered_map<std::string, std::string> styles,
+    std::unordered_map<std::string, std::string> important_styles = {},
+    uint64_t position = 0) {
+  InspectorStyleSheet res;
+  res.empty = false;
+  res.style_name_ = std::move(name);
+  res.origin_ = "regular";
+  res.style_sheet_id_ = element ? std::to_string(element->impl_id()) : "";
+  res.style_name_range_.start_line_ = start_line;
+  res.style_name_range_.end_line_ = start_line;
+  res.style_name_range_.start_column_ = 0;
+  res.position_ = position;
+
+  int property_start_column;
+  if (lynx::base::BeginsWith(res.style_name_, "inline")) {
+    res.style_name_range_.end_column_ = 0;
+    property_start_column = 0;
+  } else {
+    res.style_name_range_.end_column_ =
+        static_cast<int>(res.style_name_.size());
+    property_start_column = res.style_name_range_.end_column_ + 1;
+  }
+  res.style_value_range_.start_line_ = start_line;
+  res.style_value_range_.end_line_ = start_line;
+  res.style_value_range_.start_column_ = property_start_column;
+
+  std::string css_text;
+  auto append_properties = [&](const auto& source, bool important) {
+    for (const auto& style : source) {
+      lynx::devtool::CSSPropertyDetail property;
+      property.name_ = style.first;
+      property.value_ = style.second;
+      property.disabled_ = false;
+      property.implicit_ = false;
+      property.important_ = important;
+      property.looped_ = false;
+      property.parsed_ok_ = true;
+      property.text_ =
+          style.first + ":" + style.second + (important ? " !important;" : ";");
+      property.property_range_.start_line_ = start_line;
+      property.property_range_.end_line_ = start_line;
+      property.property_range_.start_column_ = property_start_column;
+      property.property_range_.end_column_ =
+          property_start_column + static_cast<int>(property.text_.size());
+      property_start_column = property.property_range_.end_column_;
+      css_text += property.text_;
+      res.css_properties_.insert(std::make_pair(style.first, property));
+      res.property_order_.push_back(style.first);
+    }
+  };
+  append_properties(styles, false);
+  append_properties(important_styles, true);
+
+  res.css_text_ = css_text;
+  res.style_value_range_.end_column_ = property_start_column;
+  return res;
 }
 
 }  // namespace
@@ -663,61 +740,6 @@ void ElementInspector::InitNormalElement(Element* element) {
   inspector_attribute->node_type_ = static_cast<int>(
       GetInspectorElementTypeNodeMap()[inspector_attribute->type_]);
   inspector_attribute->node_value_ = "";
-}
-
-lynx::devtool::InspectorStyleSheet ElementInspector::InitStyleSheet(
-    Element* element, int start_line, std::string name,
-    std::unordered_map<std::string, std::string> styles, uint64_t position) {
-  InspectorStyleSheet res;
-  res.empty = false;
-  res.style_name_ = name;
-  res.origin_ = "regular";
-  res.style_sheet_id_ = element ? std::to_string(element->impl_id()) : "";
-  res.style_name_range_.start_line_ = start_line;
-  res.style_name_range_.end_line_ = start_line;
-  res.style_name_range_.start_column_ = 0;
-  res.position_ = position;
-
-  int property_start_column;
-  if (lynx::base::BeginsWith(name, "inline")) {
-    res.style_name_range_.end_column_ = 0;
-    property_start_column = 0;
-  } else {
-    res.style_name_range_.end_column_ =
-        static_cast<int>(res.style_name_.size());
-    property_start_column = res.style_name_range_.end_column_ + 1;
-  }
-  res.style_value_range_.start_line_ = start_line;
-  res.style_value_range_.end_line_ = start_line;
-  res.style_value_range_.start_column_ = property_start_column;
-
-  std::unordered_multimap<std::string, lynx::devtool::CSSPropertyDetail>
-      temp_map;
-  lynx::devtool::CSSPropertyDetail temp_css_property;
-  std::string css_text;
-  for (const auto& style : styles) {
-    temp_css_property.name_ = style.first;
-    temp_css_property.value_ = style.second;
-    temp_css_property.text_ = style.first + ":" + style.second + ";";
-    css_text += temp_css_property.text_;
-    temp_css_property.disabled_ = false;
-    temp_css_property.implicit_ = false;
-    temp_css_property.parsed_ok_ = true;
-    temp_css_property.property_range_.start_line_ = start_line;
-    temp_css_property.property_range_.end_line_ = start_line;
-    temp_css_property.property_range_.start_column_ = property_start_column;
-    temp_css_property.property_range_.end_column_ =
-        property_start_column +
-        static_cast<int>(temp_css_property.text_.size());
-    property_start_column = temp_css_property.property_range_.end_column_;
-    temp_map.insert(std::make_pair(style.first, temp_css_property));
-    res.property_order_.push_back(style.first);
-  }
-
-  res.css_text_ = css_text;
-  res.style_value_range_.end_column_ = property_start_column;
-  res.css_properties_ = temp_map;
-  return res;
 }
 
 void ElementInspector::RecordStyleSheetSourceToken(
@@ -966,12 +988,7 @@ ElementInspector::GetCSSByParseToken(Element* element,
   CHECK_NULL_AND_LOG_RETURN_VALUE(token, "token is null", res);
   const StyleMap& style_map = token->GetAttributes();
   res = GetCssByStyleMap(element, style_map);
-  for (const auto& [id, value] : style_map) {
-    if (value.IsVariable()) {
-      res[CSSProperty::GetPropertyName(id).str()] =
-          GetAuthoredVariableValue(value);
-    }
-  }
+  RestoreAuthoredVariableValues(style_map, &res);
   const CSSVariableMap& css_variable_map = token->GetStyleVariables();
   std::unordered_map<std::string, std::string> css_variable =
       GetCssVariableByMap(css_variable_map);
@@ -988,18 +1005,22 @@ InspectorStyleSheet ElementInspector::ResolveStyleSheetForComputedStyle(
     return resolved_style_sheet;
   }
 
-  const auto resolved_properties =
-      GetCssByStyleMap(element, source_token->GetAttributes());
-  for (const auto& [name, value] : resolved_properties) {
-    auto range = resolved_style_sheet.css_properties_.equal_range(name);
-    for (auto it = range.first; it != range.second; ++it) {
-      auto& property = it->second;
-      if (!property.disabled_ && property.parsed_ok_) {
-        property.value_ = value;
-        break;
+  auto resolve_properties = [&](const StyleMap& styles, bool important) {
+    const auto resolved_properties = GetCssByStyleMap(element, styles);
+    for (const auto& [name, value] : resolved_properties) {
+      auto range = resolved_style_sheet.css_properties_.equal_range(name);
+      for (auto it = range.first; it != range.second; ++it) {
+        auto& property = it->second;
+        if (property.important_ == important && !property.disabled_ &&
+            property.parsed_ok_) {
+          property.value_ = value;
+          break;
+        }
       }
     }
-  }
+  };
+  resolve_properties(source_token->GetAttributes(), false);
+  resolve_properties(source_token->GetImportantAttributes(), true);
   return resolved_style_sheet;
 }
 
@@ -1129,11 +1150,15 @@ ElementInspector::GetMatchedStyleSheet(Element* element) {
         if (iter == range.second) {
           std::unordered_map<std::string, std::string> css =
               GetCSSByParseToken(element, matched_token.get());
+          auto important_css = GetCssByStyleMap(
+              element, matched_token->GetImportantAttributes());
+          RestoreAuthoredVariableValues(matched_token->GetImportantAttributes(),
+                                        &important_css);
           auto* inspector_attribute = style_root->inspector_attribute();
-          if (inspector_attribute && !css.empty()) {
-            lynx::devtool::InspectorStyleSheet style_sheet =
-                InitStyleSheet(style_root, inspector_attribute->start_line_++,
-                               name, css, matched.Position());
+          if (inspector_attribute && (!css.empty() || !important_css.empty())) {
+            lynx::devtool::InspectorStyleSheet style_sheet = InitStyleSheet(
+                style_root, inspector_attribute->start_line_++, name,
+                std::move(css), std::move(important_css), matched.Position());
             if (ShouldRecordStyleSheetSourceToken(element)) {
               RecordStyleSheetSourceToken(style_root, style_sheet,
                                           matched_token);
@@ -1224,19 +1249,26 @@ lynx::devtool::InspectorStyleSheet ElementInspector::GetStyleSheetByName(
       NormalizeAuthoredVariableProperties(token.get(), &res);
     }
   } else {
+    auto* style_sheet = element->GetRelatedCSSFragment();
+    auto token =
+        style_sheet == nullptr ? nullptr : style_sheet->GetSharedCSSStyle(name);
     std::unordered_map<std::string, std::string> css =
-        GetCSSByName(element, name);
+        token == nullptr ? GetCSSByName(element, name)
+                         : GetCSSByParseToken(element, token.get());
+    std::unordered_map<std::string, std::string> important_css;
+    if (token != nullptr) {
+      important_css =
+          GetCssByStyleMap(element, token->GetImportantAttributes());
+      RestoreAuthoredVariableValues(token->GetImportantAttributes(),
+                                    &important_css);
+    }
     auto* inspector_attribute = style_root->inspector_attribute();
-    if (inspector_attribute && !css.empty()) {
+    if (inspector_attribute && (!css.empty() || !important_css.empty())) {
       res = InitStyleSheet(style_root, inspector_attribute->start_line_++, name,
-                           css);
+                           std::move(css), std::move(important_css));
       if (ShouldRecordStyleSheetSourceToken(element)) {
-        auto* style_sheet = element->GetRelatedCSSFragment();
-        if (style_sheet != nullptr) {
-          auto token = style_sheet->GetSharedCSSStyle(name);
-          if (token != nullptr) {
-            RecordStyleSheetSourceToken(style_root, res, token);
-          }
+        if (token != nullptr) {
+          RecordStyleSheetSourceToken(style_root, res, token);
         }
       }
       inspector_attribute->style_sheet_map_.insert({name, res});
