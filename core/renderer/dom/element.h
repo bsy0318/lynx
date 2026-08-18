@@ -1733,6 +1733,7 @@ class Element : public lepus::RefCounted,
   virtual void OnNodeAdded(Element* child);
   virtual void OnNodeRemoved(Element* child);
 
+  void InvalidateTagInfo();
   virtual void SetAttributeInternal(const base::String& key,
                                     const lepus::Value& value);
   virtual void MarkHasLayoutOnlyPropsIfNecessary(

@@ -2553,6 +2553,15 @@ void Element::EnsureTagInfo() {
   }
 }
 
+void Element::InvalidateTagInfo() {
+  if (has_painting_node_) {
+    return;
+  }
+  layout_node_type_ = kLayoutNodeTypeNotInit;
+  create_node_async_ = false;
+  need_process_direction_ = false;
+}
+
 void Element::TransitionToNativeView() {
   // If already layout only or is virtual, do not need create ui for this
   // element.
