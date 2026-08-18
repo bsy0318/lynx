@@ -35,6 +35,18 @@ if (enable_unittests) {
   }
 }
 
+source_set("ui_tree_helper") {
+  sources = [
+    "ui_tree_helper.cc",
+    "ui_tree_helper.h",
+  ]
+  public_configs = [ "../../clay:config" ]
+  public_deps = [
+    "../../third_party/rapidjson:rapidjson",
+    "../ui:ui",
+  ]
+}
+
 source_set("resource_loader_embedder") {
   sources = [
     "resource_loader_embedder.cc",
@@ -86,6 +98,7 @@ source_set("lynx_adaptor") {
   ]
 
   public_deps = [
+    ":ui_tree_helper",
     "../fml:fml",
     "../ui:ui",
   ]

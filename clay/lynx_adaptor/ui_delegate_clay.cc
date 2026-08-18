@@ -7,18 +7,19 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "clay/fml/logging.h"
 #include "clay/lynx_adaptor/layout_context_clay.h"
 #include "clay/lynx_adaptor/painting_context_clay.h"
 #include "clay/lynx_adaptor/perf_controller_clay.h"
 #include "clay/lynx_adaptor/prop_bundle_impl.h"
+#include "clay/lynx_adaptor/ui_tree_helper.h"
 #include "clay/ui/common/attribute_utils.h"
 #include "clay/ui/component/page_view.h"
 #include "clay/ui/component/view_context.h"
 #include "core/services/timing_handler/timing.h"
 #include "core/template_bundle/template_codec/binary_decoder/page_config.h"
-
 namespace lynx {
 namespace tasm {
 
@@ -232,6 +233,19 @@ std::vector<float> UIDelegateClay::GetTransformValue(
   }
 
   return res;
+}
+
+std::string UIDelegateClay::GetLynxUITree() {
+  return ui_tree::GetLynxUITree(view_context_);
+}
+
+std::string UIDelegateClay::GetUINodeInfo(int id) {
+  return ui_tree::GetUINodeInfo(view_context_, id);
+}
+
+int UIDelegateClay::SetUIStyle(int id, const std::string& name,
+                               const std::string& content) {
+  return ui_tree::SetUIStyle(view_context_, id, name, content);
 }
 
 void UIDelegateClay::OnPageConfigDecoded(

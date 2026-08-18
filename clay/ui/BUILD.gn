@@ -241,4 +241,34 @@ if (enable_unittests) {
       ]
     }
   }
+
+  executable("ui_tree_helper_unittests") {
+    testonly = true
+    sources = [ "../lynx_adaptor/ui_tree_helper_unittests.cc" ]
+
+    public_configs = [
+      "../:export_dynamic_symbols",
+      "../:config",
+    ]
+
+    public_deps = [
+      ":ui",
+      ":ui_fixture_sources",
+      ":ui_fixtures",
+      "../../base/src:base_static",
+      "../common/service",
+      "../flow",
+      "../gfx",
+      "../lynx_adaptor:ui_tree_helper",
+      "../testing",
+      "../testing:skia",
+      "//third_party/skia/modules/skparagraph:skparagraph",
+    ]
+    if (is_mac) {
+      public_deps += [
+        "../shell/common:platform_overlay_service_fallback",
+        "../shell/common:presenter_service_fallback",
+      ]
+    }
+  }
 }
