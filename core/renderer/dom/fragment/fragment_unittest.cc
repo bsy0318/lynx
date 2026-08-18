@@ -7,6 +7,7 @@
 
 #include "core/renderer/dom/fragment/fragment.h"
 
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <string>
@@ -405,6 +406,77 @@ TEST_F(FragmentDrawTest, DrawViewRecordsFinalOffsetWithRenderOffset) {
   EXPECT_FLOAT_EQ(view_item.payload.draw_view.offset_x, 15.f);
   EXPECT_FLOAT_EQ(view_item.payload.draw_view.offset_y, 26.f);
   EXPECT_FALSE(reader.HasNext());
+}
+
+TEST_F(FragmentDrawTest, ZIndexChangeKeepsLayerOffsetWithoutRelayout) {
+  auto page = manager->CreateFiberPage("0", 0);
+  auto outer = manager->CreateFiberView();
+  auto inner = manager->CreateFiberView();
+  auto layer = manager->CreateFiberView();
+  layer->SetStyle(CSSPropertyID::kPropertyIDZIndex, lepus::Value(1));
+  page->InsertNode(outer);
+  outer->InsertNode(inner);
+  inner->InsertNode(layer);
+  page->FlushActionsAsRoot();
+
+  auto* page_fragment = page->fragment_impl();
+  auto* outer_fragment = outer->fragment_impl();
+  auto* inner_fragment = inner->fragment_impl();
+  auto* layer_fragment = layer->fragment_impl();
+  ASSERT_NE(page_fragment, nullptr);
+  ASSERT_NE(outer_fragment, nullptr);
+  ASSERT_NE(inner_fragment, nullptr);
+  ASSERT_NE(layer_fragment, nullptr);
+  ASSERT_EQ(layer_fragment->fragment_parent(), page_fragment);
+  ASSERT_EQ(layer_fragment->fragment_from_element_parent(), inner_fragment);
+
+  auto set_layout = [](Element* element, Fragment* fragment, float left,
+                       float top) {
+    element->left_ = left;
+    element->top_ = top;
+    starlight::LayoutResultForRendering layout;
+    layout.offset_ = starlight::FloatPoint(left, top);
+    layout.size_ = FloatSize(100.f, 40.f);
+    fragment->UpdateLayout(layout);
+  };
+  set_layout(page.get(), page_fragment, 0.f, 0.f);
+  set_layout(outer.get(), outer_fragment, 32.f, 7.f);
+  set_layout(inner.get(), inner_fragment, 31.f, 11.f);
+  set_layout(layer.get(), layer_fragment, 3.f, 5.f);
+  page_fragment->UpdateLayout(0.f, 0.f);
+
+  auto expect_layer_offset = [&]() {
+    DisplayListBuilder builder;
+    page_fragment->DrawChildren(builder);
+    auto items = CollectDisplayListItems(builder.Build());
+    auto it = std::find_if(items.begin(), items.end(), [&](const auto& item) {
+      return item.type == DisplayListOpType::kDrawView &&
+             item.payload.draw_view.view_id == layer_fragment->id();
+    });
+    ASSERT_NE(it, items.end());
+    EXPECT_FLOAT_EQ(it->payload.draw_view.offset_x, 66.f);
+    EXPECT_FLOAT_EQ(it->payload.draw_view.offset_y, 23.f);
+  };
+
+  expect_layer_offset();
+
+  layer->SetStyle(CSSPropertyID::kPropertyIDZIndex, lepus::Value(2));
+  page->FlushActionsAsRoot();
+  ASSERT_EQ(layer_fragment->fragment_parent(), page_fragment);
+  ASSERT_EQ(layer_fragment->fragment_from_element_parent(), inner_fragment);
+  expect_layer_offset();
+
+  layer->SetStyle(CSSPropertyID::kPropertyIDZIndex, lepus::Value(0));
+  page->FlushActionsAsRoot();
+  ASSERT_EQ(layer_fragment->fragment_parent(), inner_fragment);
+  ASSERT_EQ(layer_fragment->fragment_from_element_parent(), nullptr);
+  expect_layer_offset();
+
+  layer->SetStyle(CSSPropertyID::kPropertyIDZIndex, lepus::Value(1));
+  page->FlushActionsAsRoot();
+  ASSERT_EQ(layer_fragment->fragment_parent(), page_fragment);
+  ASSERT_EQ(layer_fragment->fragment_from_element_parent(), inner_fragment);
+  expect_layer_offset();
 }
 
 TEST_F(FragmentTest, CreateLayerIfNeededWritesFlattenInitData) {

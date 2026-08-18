@@ -156,7 +156,11 @@ void Fragment::StyleChanged() {
     } else if (old_z_index() != 0) {
       // If z-index is not 0, the parent should be the nearest stacking
       // context fragment.
-      target_parent = EnclosingStackingContextNode()->CastToFragment();
+      target_parent = element()
+                          ->parent()
+                          ->fragment_impl()
+                          ->EnclosingStackingContextNode()
+                          ->CastToFragment();
     } else {
       // If it is not fixed and z-index is 0, the parent should be the
       // fragment corresponding to the element's parent.
@@ -1630,6 +1634,19 @@ void Fragment::UpdateBorderRadiusAccordingToLayoutInfo() {
 
 void Fragment::UpdateRenderOffsetRecursively(float left, float top,
                                              Fragment* root) {
+  auto* target_parent = fragment_parent();
+  if (!was_position_fixed() && fragment_from_element_parent() != nullptr &&
+      target_parent != nullptr &&
+      fragment_from_element_parent() != target_parent) {
+    // Resolve the element-parent delta into render_offset_ during layout so a
+    // later z-index-only remount can reuse the same final layer coordinates.
+    auto* parent = element()->render_parent();
+    while (parent != nullptr && parent != target_parent->element()) {
+      left += parent->left();
+      top += parent->top();
+      parent = parent->parent();
+    }
+  }
   float child_offset_x = left + layout_info_.layout_result.offset_.X();
   float child_offset_y = top + layout_info_.layout_result.offset_.Y();
   if (has_platform_renderer_) {
