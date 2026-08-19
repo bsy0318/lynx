@@ -51,6 +51,62 @@ std::unique_ptr<char[]> ModpB64Encode(const char* source, size_t source_size,
   return base64_data;
 }
 
+std::string CompressToBase64String(const std::string& source) {
+  unsigned long compressed_size = 0;
+  std::unique_ptr<Byte[]> compressed_data =
+      Compress(source.data(), source.length(), &compressed_size);
+  if (compressed_data == nullptr) {
+    return "";
+  }
+  unsigned long base64_size = 0;
+  std::unique_ptr<char[]> base64_data =
+      ModpB64Encode(reinterpret_cast<const char*>(compressed_data.get()),
+                    compressed_size, &base64_size);
+  return std::string(base64_data.get(), base64_size);
+}
+
+namespace {
+
+// Single time source for the record timestamps so the seconds member and the
+// milliseconds member of RecordTime (and later the fixture view) cannot drift
+// apart.
+int64_t CurrentRecordMillis() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+}  // namespace
+
+bool WriteRecordJson(const std::string& filename, rapidjson::Value& doc) {
+  std::ofstream ifs;
+  ifs.open(filename, std::ios::binary | std::ios::out);
+  if (!ifs.is_open()) {
+    return false;
+  }
+  rapidjson::StringBuffer os;
+  rapidjson::Writer<rapidjson::StringBuffer, rapidjson::UTF8<>,
+                    rapidjson::UTF8<>, rapidjson::CrtAllocator,
+                    rapidjson::kWriteNanAndInfFlag>
+      writer(os);
+  doc.Accept(writer);
+  const std::string encoded =
+      CompressToBase64String(std::string(os.GetString(), os.GetSize()));
+  // CompressToBase64String returns "" only when compression fails; never leave
+  // an empty (or partially written) artifact behind in that case.
+  bool ok = false;
+  if (!encoded.empty()) {
+    ifs.write(encoded.data(), encoded.size());
+    ifs.flush();
+    ok = ifs.good();
+  }
+  ifs.close();
+  if (!ok) {
+    std::remove(filename.c_str());
+  }
+  return ok;
+}
+
 TestBenchBaseRecorder::TestBenchBaseRecorder() : thread_("ark_recorder") {
   is_recording_ = false;
 }
@@ -161,38 +217,20 @@ void TestBenchBaseRecorder::EndRecord(
       rapidjson::Value& config = replay_config_map_[shell_id];
       std::string filename = file_path_ + std::to_string(shell_id) + ".json";
       {
-        std::ofstream ifs;
-        ifs.open(filename, std::ios::binary | std::ios::out);
-        if (ifs.is_open()) {
-          rapidjson::Value& doc = lynx_view_pair.second;
-          rapidjson::Document::AllocatorType& allocator = GetAllocator();
-          doc.AddMember(rapidjson::StringRef(kConfig), config, allocator);
-          rapidjson::StringBuffer os;
-          rapidjson::Writer<rapidjson::StringBuffer, rapidjson::UTF8<>,
-                            rapidjson::UTF8<>, rapidjson::CrtAllocator,
-                            rapidjson::kWriteNanAndInfFlag>
-              writer(os);
-          doc.Accept(writer);
-          unsigned long compressed_size;
-          std::unique_ptr<Byte[]> compressed_data =
-              Compress(os.GetString(), os.GetSize(), &compressed_size);
-          if (compressed_data != nullptr) {
-            unsigned long base64_size;
-            std::unique_ptr<char[]> base64_data = ModpB64Encode(
-                reinterpret_cast<const char*>(compressed_data.get()),
-                compressed_size, &base64_size);
-            ifs.write(base64_data.get(), base64_size);
-            ifs.flush();
+        rapidjson::Value& doc = lynx_view_pair.second;
+        rapidjson::Document::AllocatorType& allocator = GetAllocator();
+        doc.AddMember(rapidjson::StringRef(kConfig), config, allocator);
+        // Only report the artifact when it was actually written, so the
+        // filenames/sessions arrays stay index-aligned with real files.
+        if (WriteRecordJson(filename, doc)) {
+          filenames.push_back(filename);
+          if (this->session_ids_.find(shell_id) != this->session_ids_.end()) {
+            sessions.push_back(this->session_ids_[shell_id]);
+          } else {
+            sessions.push_back(-1);
           }
-          ifs.close();
         }
       }
-      if (this->session_ids_.find(shell_id) != this->session_ids_.end()) {
-        sessions.push_back(this->session_ids_[shell_id]);
-      } else {
-        sessions.push_back(-1);
-      }
-      filenames.push_back(filename);
     }
     // send a recordingComplete event
     complete_func(filenames, sessions);
@@ -408,15 +446,9 @@ void TestBenchBaseRecorder::RecordDebugInfo(int64_t record_id,
 
     rapidjson::Value content_val(rapidjson::kStringType);
     // compress content for large data
-    unsigned long compressed_size;
-    std::unique_ptr<Byte[]> compressed_data =
-        Compress(content.c_str(), content.length(), &compressed_size);
-    if (compressed_data != nullptr) {
-      unsigned long base64_size;
-      std::unique_ptr<char[]> base64_data =
-          ModpB64Encode(reinterpret_cast<const char*>(compressed_data.get()),
-                        compressed_size, &base64_size);
-      content_val.SetString(base64_data.get(), allocator);
+    const std::string encoded_content = CompressToBase64String(content);
+    if (!encoded_content.empty()) {
+      content_val.SetString(encoded_content.c_str(), allocator);
     }
 
     rapidjson::Value val;
@@ -455,15 +487,9 @@ void TestBenchBaseRecorder::RecordScripts(const char* url, const char* source,
 
     rapidjson::Value source_val(rapidjson::kStringType);
 
-    unsigned long compressed_size;
-    std::unique_ptr<Byte[]> compressed_data =
-        Compress(source.c_str(), source.length(), &compressed_size);
-    if (compressed_data != nullptr) {
-      unsigned long base64_size;
-      std::unique_ptr<char[]> base64_data =
-          ModpB64Encode(reinterpret_cast<const char*>(compressed_data.get()),
-                        compressed_size, &base64_size);
-      source_val.SetString(base64_data.get(), allocator);
+    const std::string encoded_source = CompressToBase64String(source);
+    if (!encoded_source.empty()) {
+      source_val.SetString(encoded_source.c_str(), allocator);
     }
     scripts.AddMember(url_val, source_val, allocator);
   };
@@ -506,12 +532,9 @@ void TestBenchBaseRecorder::RecordTime(rapidjson::Value& val) {
   val.AddMember(rapidjson::StringRef(kParamRecordTime), time_val, allocator);
 
   // record Millisecond
-  int64_t m_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::system_clock::now().time_since_epoch())
-                       .count();
   rapidjson::Value m_time_val;
-  time_val.SetInt64(m_time);
-  val.AddMember(rapidjson::StringRef(kParamRecordMillisecond), time_val,
+  m_time_val.SetInt64(CurrentRecordMillis());
+  val.AddMember(rapidjson::StringRef(kParamRecordMillisecond), m_time_val,
                 allocator);
 }
 

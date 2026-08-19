@@ -95,6 +95,16 @@ class TestBenchBaseRecorder {
   void Clear();
 };
 
+// Compresses source with zlib and base64-encodes the compressed bytes.
+// Returns the encoded string, or an empty string when compression fails.
+// Shared by WriteRecordJson, RecordScripts and RecordDebugInfo.
+std::string CompressToBase64String(const std::string& source);
+
+// Writes one shell's V1 record json (serialize + zlib compress + base64) to
+// recorder{shell_id}.json. Returns true on success. Extracted from EndRecord
+// so it is independently unit-testable; the doc must already contain Config.
+bool WriteRecordJson(const std::string& filename, rapidjson::Value& doc);
+
 }  // namespace recorder
 }  // namespace tasm
 }  // namespace lynx
