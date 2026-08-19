@@ -18,7 +18,6 @@ devtool_source_set("input") {
 
   public_deps = [
     ":input_types",
-    "../../../core/base:vsync_monitor_headers",
   ]
 }
 
