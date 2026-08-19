@@ -44,6 +44,17 @@
 @implementation LynxPanInterceptUnitTestView
 @end
 
+@interface LynxFocusContainerView : UIView
+@property(nonatomic, assign) BOOL didEndEditing;
+@end
+
+@implementation LynxFocusContainerView
+- (BOOL)endEditing:(BOOL)force {
+  self.didEndEditing = YES;
+  return YES;
+}
+@end
+
 static const NSInteger kLynxPanInterceptUnitTestViewTag = 1001;
 
 @implementation LynxEventHanderUnitTest {
@@ -63,6 +74,38 @@ static const NSInteger kLynxPanInterceptUnitTestViewTag = 1001;
   // Put teardown code here. This method is called after the invocation of each test method in the
   // class.
   _handler = NULL;
+}
+
+- (void)testHandleFocusOnViewUsesExplicitIgnoreFocus {
+  UIView* hitView = [[UIView alloc] init];
+  LynxFocusContainerView* container = [[LynxFocusContainerView alloc] init];
+  UIEvent* event = [[UIEvent alloc] init];
+
+  [_handler handleFocusOnView:hitView
+                withContainer:container
+                     andPoint:CGPointZero
+                     andEvent:event
+                  ignoreFocus:YES];
+  XCTestExpectation* ignoredFocusDrain =
+      [self expectationWithDescription:@"wait for ignored focus main queue"];
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [ignoredFocusDrain fulfill];
+  });
+  [self waitForExpectations:@[ ignoredFocusDrain ] timeout:1];
+  XCTAssertFalse(container.didEndEditing);
+
+  [_handler handleFocusOnView:hitView
+                withContainer:container
+                     andPoint:CGPointZero
+                     andEvent:event
+                  ignoreFocus:NO];
+  XCTestExpectation* allowedFocusDrain =
+      [self expectationWithDescription:@"wait for allowed focus main queue"];
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [allowedFocusDrain fulfill];
+  });
+  [self waitForExpectations:@[ allowedFocusDrain ] timeout:1];
+  XCTAssertTrue(container.didEndEditing);
 }
 
 - (void)testOnGestureRecognizedByEventTargetAsync {

@@ -7,11 +7,18 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import android.graphics.Matrix;
 import android.graphics.PointF;
 import android.os.SystemClock;
+import android.view.InputDevice;
 import android.view.MotionEvent;
 import com.lynx.react.bridge.DynamicFromArray;
 import com.lynx.react.bridge.JavaOnlyArray;
@@ -31,6 +38,7 @@ import com.lynx.tasm.gesture.detector.GestureDetector;
 import com.lynx.tasm.gesture.handler.GestureConstants;
 import com.lynx.testing.base.TestingUtils;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -38,6 +46,7 @@ import java.util.Map;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.InOrder;
 
 public class TouchEventDispatcherTest {
   private LynxContext mContext;
@@ -327,6 +336,77 @@ public class TouchEventDispatcherTest {
       e.printStackTrace();
       assertEquals(1, 0, 0);
     }
+  }
+
+  @Test
+  public void testPlatformFocusIsDispatchedBeforeTapForActionUp() throws Exception {
+    IPaintingContext paintingContext = mock(IPaintingContext.class);
+    when(paintingContext.dispatchPlatformMotionEvent(any(MotionEvent.class), anyInt()))
+        .thenReturn(true);
+    MotionEvent event = obtainSinglePointerEvent(MotionEvent.ACTION_UP, 1);
+
+    invokeHandlePlatformMotionEvent(event, paintingContext);
+
+    InOrder order = inOrder(paintingContext);
+    order.verify(paintingContext).dispatchPlatformMotionEvent(event, mRootUI.getSign());
+    order.verify(paintingContext).dispatchPlatformFocus();
+    order.verify(paintingContext).dispatchPlatformTap();
+    event.recycle();
+  }
+
+  @Test
+  public void testPlatformFocusIsNotDispatchedForPointerUp() throws Exception {
+    IPaintingContext paintingContext = mock(IPaintingContext.class);
+    when(paintingContext.dispatchPlatformMotionEvent(any(MotionEvent.class), anyInt()))
+        .thenReturn(true);
+    MotionEvent event = obtainPointerUpEvent(0);
+
+    invokeHandlePlatformMotionEvent(event, paintingContext);
+
+    verify(paintingContext, never()).dispatchPlatformFocus();
+    verify(paintingContext, never()).dispatchPlatformTap();
+    event.recycle();
+  }
+
+  private MotionEvent obtainPointerUpEvent(int actionPointerId) {
+    MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[2];
+    MotionEvent.PointerCoords[] coordinates = new MotionEvent.PointerCoords[2];
+    for (int i = 0; i < 2; ++i) {
+      properties[i] = new MotionEvent.PointerProperties();
+      properties[i].id = i == 0 ? actionPointerId : (actionPointerId == 0 ? 1 : 0);
+      properties[i].toolType = MotionEvent.TOOL_TYPE_FINGER;
+      coordinates[i] = new MotionEvent.PointerCoords();
+      coordinates[i].x = 100 + i;
+      coordinates[i].y = 100 + i;
+      coordinates[i].pressure = 1;
+      coordinates[i].size = 1;
+    }
+    return MotionEvent.obtain(SystemClock.uptimeMillis(), SystemClock.uptimeMillis(),
+        MotionEvent.ACTION_POINTER_UP, 2, properties, coordinates, 0, 0, 1, 1, 0, 0,
+        InputDevice.SOURCE_TOUCHSCREEN, 0);
+  }
+
+  private MotionEvent obtainSinglePointerEvent(int action, int pointerId) {
+    MotionEvent.PointerProperties properties = new MotionEvent.PointerProperties();
+    properties.id = pointerId;
+    properties.toolType = MotionEvent.TOOL_TYPE_FINGER;
+    MotionEvent.PointerCoords coordinates = new MotionEvent.PointerCoords();
+    coordinates.x = 100;
+    coordinates.y = 100;
+    coordinates.pressure = 1;
+    coordinates.size = 1;
+    return MotionEvent.obtain(SystemClock.uptimeMillis(), SystemClock.uptimeMillis(), action, 1,
+        new MotionEvent.PointerProperties[] {properties},
+        new MotionEvent.PointerCoords[] {coordinates}, 0, 0, 1, 1, 0, 0,
+        InputDevice.SOURCE_TOUCHSCREEN, 0);
+  }
+
+  private boolean invokeHandlePlatformMotionEvent(
+      MotionEvent event, IPaintingContext paintingContext) throws Exception {
+    Method method = TouchEventDispatcher.class.getDeclaredMethod("handlePlatformMotionEvent",
+        MotionEvent.class, com.lynx.tasm.behavior.ui.UIGroup.class, IPaintingContext.class);
+    method.setAccessible(true);
+    return (boolean) method.invoke(mDispatcher, event, mRootUI, paintingContext);
   }
 
   @Test

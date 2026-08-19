@@ -690,6 +690,211 @@ TEST_F(FragmentTest, PlatformEventTargetInheritsEventThroughFromPage) {
   EXPECT_FALSE(child_target->EventThrough(point, true));
 }
 
+TEST_F(FragmentTest, IgnoreFocusEventPropMappingAndReset) {
+  EXPECT_EQ(PlatformEventPropNameFromString("ignore-focus"),
+            PlatformEventPropName::kIgnoreFocus);
+  EXPECT_EQ(PlatformEventPropNameToString(PlatformEventPropName::kIgnoreFocus),
+            "ignore-focus");
+
+  auto element = manager->CreateFiberView();
+  auto* fragment = element->fragment_impl();
+  ASSERT_NE(fragment, nullptr);
+
+  element->SetAttributeInternal("ignore-focus", lepus::Value(true));
+  auto prop = fragment->event_props_.find(PlatformEventPropName::kIgnoreFocus);
+  ASSERT_NE(prop, fragment->event_props_.end());
+  EXPECT_TRUE(prop->second.Bool());
+
+  element->ResetAttribute(base::String("ignore-focus"));
+  prop = fragment->event_props_.find(PlatformEventPropName::kIgnoreFocus);
+  ASSERT_NE(prop, fragment->event_props_.end());
+  EXPECT_TRUE(prop->second.IsNil() || prop->second.IsUndefined());
+}
+
+TEST_F(FragmentTest, PlatformEventTargetInheritsIgnoreFocusWithinEventRoot) {
+  auto root_target = fml::MakeRefCounted<PlatformEventTarget>(
+      nullptr, kRootId, kRootId, 0.f, 0.f, 100.f, 100.f);
+  auto child_target = fml::MakeRefCounted<PlatformEventTarget>(
+      nullptr, kRootId, 1, 0.f, 0.f, 100.f, 100.f);
+  root_target->SetIgnoreFocus(LynxEventPropStatus::kEnable);
+  root_target->AddChildTarget(child_target);
+
+  EXPECT_TRUE(root_target->IgnoreFocus());
+  EXPECT_TRUE(child_target->IgnoreFocus());
+
+  child_target->SetIgnoreFocus(LynxEventPropStatus::kDisable);
+  EXPECT_FALSE(child_target->IgnoreFocus());
+  child_target->SetIgnoreFocus(LynxEventPropStatus::kUndefined);
+  EXPECT_TRUE(child_target->IgnoreFocus());
+
+  auto another_root_child = fml::MakeRefCounted<PlatformEventTarget>(
+      nullptr, 20, 21, 0.f, 0.f, 100.f, 100.f);
+  root_target->AddChildTarget(another_root_child);
+  EXPECT_FALSE(another_root_child->IgnoreFocus());
+
+  auto another_root = fml::MakeRefCounted<PlatformEventTarget>(
+      nullptr, 20, 20, 0.f, 0.f, 100.f, 100.f);
+  root_target->AddChildTarget(another_root);
+  EXPECT_FALSE(another_root->IgnoreFocus());
+}
+
+TEST_F(FragmentTest, ReconstructedEventTargetTracksRendererHostAndIgnoreFocus) {
+  auto root_renderer = fml::MakeRefCounted<TestPlatformRenderer>(
+      kRootId, PlatformRendererType::kPage);
+  DisplayListBuilder root_builder;
+  root_builder
+      .Begin(kRootId, PlatformRendererType::kPage, 0.f, 0.f, 100.f, 100.f)
+      .DrawView(1, 0.f, 0.f)
+      .End();
+  root_renderer->UpdateDisplayList(root_builder.Build());
+
+  auto child_renderer =
+      fml::MakeRefCounted<TestPlatformRenderer>(1, PlatformRendererType::kView);
+  DisplayListBuilder child_builder;
+  child_builder.Begin(1, PlatformRendererType::kView, 0.f, 0.f, 100.f, 100.f)
+      .Begin(2, PlatformRendererType::kView, 0.f, 0.f, 50.f, 50.f)
+      .End()
+      .End();
+  child_renderer->UpdateDisplayList(child_builder.Build());
+  root_renderer->AddChild(child_renderer);
+
+  PlatformEventPropMap event_props;
+  event_props.insert_or_assign(PlatformEventPropName::kIgnoreFocus,
+                               lepus::Value(true));
+  TestNativePaintingCtxPlatformRef platform_ref;
+  platform_ref.renderers_.insert_or_assign(kRootId, root_renderer);
+  platform_ref.renderers_.insert_or_assign(1, child_renderer);
+  platform_ref.UpdatePlatformEventBundle(
+      1, PlatformEventBundle(std::move(event_props), {}));
+
+  auto root_target = platform_ref.ReconstructEventTargetTreeRecursively();
+  ASSERT_NE(root_target, nullptr);
+  EXPECT_EQ(root_target->RendererHostSign(), kRootId);
+
+  auto host_target = platform_ref.GetEventTargetHelper()->GetEventTarget(1);
+  auto flattened_target =
+      platform_ref.GetEventTargetHelper()->GetEventTarget(2);
+  ASSERT_NE(host_target, nullptr);
+  ASSERT_NE(flattened_target, nullptr);
+  EXPECT_EQ(host_target->RendererHostSign(), 1);
+  EXPECT_EQ(flattened_target->RendererHostSign(), 1);
+  EXPECT_TRUE(host_target->IgnoreFocus());
+  EXPECT_TRUE(flattened_target->IgnoreFocus());
+  EXPECT_TRUE(
+      platform_ref.IsPlatformEventTargetIgnoreFocus(kRootId, 10.f, 10.f));
+}
+
+TEST_F(FragmentTest, PlatformEventHandlerTracksFirstPointerFocusInfo) {
+  TestNativePaintingCtxPlatformRef platform_ref;
+  auto root_target = fml::MakeRefCounted<PlatformEventTarget>(
+      platform_ref.GetEventTargetHelper(), kRootId, kRootId, 0.f, 0.f, 100.f,
+      100.f);
+  auto child_target = fml::MakeRefCounted<PlatformEventTarget>(
+      platform_ref.GetEventTargetHelper(), kRootId, 1, 0.f, 0.f, 50.f, 50.f);
+  child_target->SetRendererHostSign(7);
+  child_target->SetIgnoreFocus(LynxEventPropStatus::kEnable);
+  root_target->AddChildTarget(child_target);
+
+  auto* handler = platform_ref.event_handler_.get();
+  int down_data[] = {0, 0, 0, 1};
+  float pointer_data[] = {0.f, 10.f, 10.f};
+  EXPECT_TRUE(
+      handler->OnInputEvent(root_target, down_data, pointer_data, false));
+  EXPECT_EQ(handler->HitTargetSign(), 1);
+  EXPECT_EQ(handler->RendererHostSign(), 7);
+  EXPECT_TRUE(handler->IgnoreFocus());
+  EXPECT_TRUE(handler->CanRespondFocus());
+  EXPECT_EQ(platform_ref.GetPlatformFocusInfo(),
+            (std::array<int32_t, 4>{1, 7, 1, 1}));
+
+  int up_data[] = {0, 1, 0, 1};
+  EXPECT_TRUE(handler->OnInputEvent(root_target, up_data, pointer_data, false));
+  EXPECT_TRUE(handler->CanRespondFocus());
+  EXPECT_EQ(platform_ref.GetPlatformFocusInfo(),
+            (std::array<int32_t, 4>{1, 7, 1, 1}));
+
+  EXPECT_TRUE(
+      handler->OnInputEvent(root_target, down_data, pointer_data, false));
+  EXPECT_TRUE(handler->CanRespondFocus());
+  int cancel_data[] = {0, 3, 0, 1};
+  EXPECT_TRUE(
+      handler->OnInputEvent(root_target, cancel_data, pointer_data, false));
+  EXPECT_EQ(handler->HitTargetSign(), 1);
+  EXPECT_EQ(handler->RendererHostSign(), 7);
+  EXPECT_TRUE(handler->IgnoreFocus());
+}
+
+TEST_F(FragmentTest, PlatformEventHandlerKeepsFocusInfoForEventThrough) {
+  TestNativePaintingCtxPlatformRef platform_ref;
+  auto root_target = fml::MakeRefCounted<PlatformEventTarget>(
+      platform_ref.GetEventTargetHelper(), kRootId, kRootId, 0.f, 0.f, 100.f,
+      100.f);
+  auto child_target = fml::MakeRefCounted<PlatformEventTarget>(
+      platform_ref.GetEventTargetHelper(), kRootId, 1, 0.f, 0.f, 50.f, 50.f);
+  child_target->SetRendererHostSign(7);
+  child_target->SetIgnoreFocus(LynxEventPropStatus::kEnable);
+  child_target->SetEventThrough(LynxEventPropStatus::kEnable);
+  root_target->AddChildTarget(child_target);
+
+  int down_data[] = {0, 0, 0, 1};
+  float pointer_data[] = {0.f, 10.f, 10.f};
+  auto* handler = platform_ref.event_handler_.get();
+  EXPECT_FALSE(
+      handler->OnInputEvent(root_target, down_data, pointer_data, false));
+  EXPECT_EQ(handler->HitTargetSign(), 1);
+  EXPECT_EQ(handler->RendererHostSign(), 7);
+  EXPECT_TRUE(handler->IgnoreFocus());
+}
+
+TEST_F(FragmentTest, PlatformEventHandlerBlocksFocusWhenScrollOffsetChanges) {
+  TestNativePaintingCtxPlatformRef platform_ref;
+  auto root_target = fml::MakeRefCounted<PlatformEventTarget>(
+      platform_ref.GetEventTargetHelper(), kRootId, kRootId, 0.f, 0.f, 100.f,
+      100.f);
+  auto scroll_target = fml::MakeRefCounted<PlatformEventTarget>(
+      platform_ref.GetEventTargetHelper(), kRootId, 1, 0.f, 0.f, 50.f, 50.f);
+  scroll_target->SetRendererHostSign(1);
+  scroll_target->SetScrollContainer(true);
+  root_target->AddChildTarget(scroll_target);
+  platform_ref.scroll_offsets[1] = {0.f, 0.f};
+
+  int down_data[] = {0, 0, 0, 1};
+  float pointer_data[] = {0.f, 10.f, 10.f};
+  auto* handler = platform_ref.event_handler_.get();
+  EXPECT_TRUE(
+      handler->OnInputEvent(root_target, down_data, pointer_data, false));
+
+  platform_ref.scroll_offsets[1] = {0.f, 10.f};
+  int up_data[] = {0, 1, 0, 1};
+  EXPECT_TRUE(handler->OnInputEvent(root_target, up_data, pointer_data, false));
+  EXPECT_FALSE(handler->CanRespondFocus());
+}
+
+TEST_F(FragmentTest, PlatformEventHandlerBlocksFocusWhenFirstPointerMoves) {
+  TestNativePaintingCtxPlatformRef platform_ref;
+  auto root_target = fml::MakeRefCounted<PlatformEventTarget>(
+      platform_ref.GetEventTargetHelper(), kRootId, kRootId, 0.f, 0.f, 100.f,
+      100.f);
+  auto child_target = fml::MakeRefCounted<PlatformEventTarget>(
+      platform_ref.GetEventTargetHelper(), kRootId, 1, 0.f, 0.f, 50.f, 50.f);
+  root_target->AddChildTarget(child_target);
+
+  int down_data[] = {0, 0, 0, 1};
+  float down_pointer_data[] = {0.f, 10.f, 10.f};
+  auto* handler = platform_ref.event_handler_.get();
+  EXPECT_TRUE(
+      handler->OnInputEvent(root_target, down_data, down_pointer_data, false));
+  EXPECT_TRUE(handler->CanRespondFocus());
+
+  int move_data[] = {0, 2, 0, 1};
+  float move_pointer_data[] = {0.f, 20.f, 10.f};
+  EXPECT_TRUE(
+      handler->OnInputEvent(root_target, move_data, move_pointer_data, false));
+  EXPECT_FALSE(handler->CanRespondFocus());
+  EXPECT_EQ(platform_ref.GetPlatformFocusInfo(),
+            (std::array<int32_t, 4>{1, -1, 0, 0}));
+}
+
 TEST_F(FragmentTest, ValidExposureEventPropsBypassEqualCheck) {
   auto element = manager->CreateFiberText("text");
   Fragment fragment(element.get());

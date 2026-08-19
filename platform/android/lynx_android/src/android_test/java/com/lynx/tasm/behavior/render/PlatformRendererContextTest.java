@@ -34,6 +34,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -369,6 +370,59 @@ public class PlatformRendererContextTest {
     rendererContext.updatePlatformExtraData(1, extraData);
 
     verify(renderer).updateExtraData(extraData);
+  }
+
+  @Test
+  public void testUpdatePlatformFocusUsesExactUIAndPreservesTransitionOrder() {
+    LynxUIOwner owner = mock(LynxUIOwner.class);
+    LynxBaseUI previousUI = mock(LynxBaseUI.class);
+    LynxBaseUI nextUI = mock(LynxBaseUI.class);
+    when(mockLynxContext.getLynxUIOwner()).thenReturn(owner);
+    when(owner.getNode(1)).thenReturn(previousUI);
+    when(owner.getNode(2)).thenReturn(nextUI);
+    when(previousUI.isFocusable()).thenReturn(true);
+    when(nextUI.isFocusable()).thenReturn(true);
+
+    rendererContext.updatePlatformFocus(1, 10);
+    clearInvocations(previousUI, nextUI);
+    rendererContext.updatePlatformFocus(2, 20);
+
+    InOrder order = inOrder(nextUI, previousUI);
+    order.verify(nextUI).onFocusChanged(true, true);
+    order.verify(previousUI).onFocusChanged(false, true);
+  }
+
+  @Test
+  public void testUpdatePlatformFocusUsesRendererUIHost() {
+    LynxUIOwner owner = mock(LynxUIOwner.class);
+    LynxBaseUI uiHost = mock(LynxBaseUI.class);
+    ViewGroup view = mock(ViewGroup.class);
+    Renderer renderer = new Renderer(rendererContext, 20);
+    renderer.setUIHost(uiHost);
+    when(mockLynxContext.getLynxUIOwner()).thenReturn(owner);
+    when(uiHost.isFocusable()).thenReturn(true);
+    rendererContext.mViewHolder.put(20, createHost(view, renderer));
+
+    rendererContext.updatePlatformFocus(1, 20);
+
+    verify(uiHost).onFocusChanged(true, false);
+    verify(view, never()).requestFocus();
+  }
+
+  @Test
+  public void testUpdatePlatformFocusUsesRendererHostAndBlursOnDrawTarget() {
+    LynxUIOwner owner = mock(LynxUIOwner.class);
+    ViewGroup focusableView = mock(ViewGroup.class);
+    when(mockLynxContext.getLynxUIOwner()).thenReturn(owner);
+    when(focusableView.isFocusable()).thenReturn(true);
+    rendererContext.mViewHolder.put(20, createHost(focusableView));
+
+    rendererContext.updatePlatformFocus(1, 20);
+    rendererContext.updatePlatformFocus(1, 20);
+    verify(focusableView, times(1)).requestFocus();
+
+    rendererContext.updatePlatformFocus(2, 30);
+    verify(focusableView).clearFocus();
   }
 
   @Test

@@ -101,6 +101,21 @@ public class NativePaintingContextTest {
   }
 
   @Test
+  public void handlePlatformFocusInfoConsumesIgnoreAndCanRespondFocus() {
+    clearInvocations(mSpyPlatformContext);
+
+    mNativePaintingContext.handlePlatformFocusInfo(null);
+    mNativePaintingContext.handlePlatformFocusInfo(new int[] {1, 2, 0});
+    mNativePaintingContext.handlePlatformFocusInfo(new int[] {1, 2, 1, 1});
+    mNativePaintingContext.handlePlatformFocusInfo(new int[] {1, 2, 0, 0});
+
+    verify(mSpyPlatformContext, never()).updatePlatformFocus(anyInt(), anyInt());
+
+    mNativePaintingContext.handlePlatformFocusInfo(new int[] {1, 2, 0, 1});
+    verify(mSpyPlatformContext).updatePlatformFocus(1, 2);
+  }
+
+  @Test
   public void destroyDoesNotThrowException() {
     try {
       mNativePaintingContext.destroy();
