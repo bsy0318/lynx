@@ -87,8 +87,17 @@ napi_value NativeModuleHarmony::InvokePlatformMethod(
       callback_data->flow_id = flow_id;
       callback_data->first_arg = first_arg;
 #endif
-      napi_create_function(env, "callback", 9, NativeModuleHarmony::Callback,
-                           callback_data, &argv[i]);
+      napi_create_function(env, "callback", NAPI_AUTO_LENGTH,
+                           NativeModuleHarmony::Callback, callback_data,
+                           &argv[i]);
+      // Add a finalizer to release the native CallbackData when the JS function
+      // is garbage collected.
+      napi_add_finalizer(
+          env, argv[i], callback_data,
+          [](napi_env env, void* finalize_data, void* finalize_hint) {
+            delete static_cast<CallbackData*>(finalize_data);
+          },
+          nullptr, nullptr);
     } else {
       argv[i] = base::NapiConvertHelper::CreateNapiValue(env, value);
     }
@@ -212,11 +221,6 @@ napi_value NativeModuleHarmony::Callback(napi_env env,
   if (status != napi_ok) {
     return js_this;
   }
-  auto delegate = data->delegate.lock();
-  if (!delegate) {
-    delete data;
-    return js_this;
-  }
   TRACE_EVENT(
       LYNX_TRACE_CATEGORY_JSB, INVOKE_CALLBACK_ON_UI_THREAD,
       [&data](lynx::perfetto::EventContext ctx) {
@@ -225,6 +229,13 @@ napi_value NativeModuleHarmony::Callback(napi_env env,
         ctx.event()->add_debug_annotations("arg0", data->first_arg);
         ctx.event()->add_flow_ids(data->flow_id);
       });
+
+  auto delegate = data->delegate.lock();
+  if (!delegate) {
+    // If delegate is gone, we can't invoke callback. The finalizer will clean
+    // up data.
+    return js_this;
+  }
 
   napi_value* dynamic_args = nullptr;
   if (argc > STATIC_ARG_SIZE) {
@@ -259,7 +270,6 @@ napi_value NativeModuleHarmony::Callback(napi_env env,
   if (dynamic_args != nullptr) {
     delete[] dynamic_args;
   }
-  delete data;
   return js_this;
 }
 
