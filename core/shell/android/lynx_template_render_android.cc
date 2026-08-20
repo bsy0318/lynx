@@ -626,6 +626,31 @@ void LoadTemplateByPreParsedData(JNIEnv* env, jclass jcaller, jlong ptr,
                        options);
 }
 
+void LoadLynxML(JNIEnv* env, jclass jcaller, jlong ptr, jlong lifecycle,
+                jstring j_url, jstring j_source, jlong data, jboolean read_only,
+                jstring name, jobject j_timing_option) {
+  std::string processor_name = JNIConvertHelper::ConvertToString(env, name);
+  auto value = data ? *(reinterpret_cast<Value*>(data)) : Value();
+  auto template_data = value.IsNil()
+                           ? nullptr
+                           : std::make_shared<lynx::tasm::TemplateData>(
+                                 value, read_only, std::move(processor_name));
+
+  AtomicLifecycle* lifecycle_ptr =
+      reinterpret_cast<AtomicLifecycle*>(lifecycle);
+  if (!AtomicLifecycle::TryLock(lifecycle_ptr)) {
+    return;
+  }
+
+  auto pipeline_options =
+      ProcessLoadTemplateTimingOption(env, ptr, j_timing_option, 0);
+  reinterpret_cast<LynxShell*>(ptr)->LoadLynxML(
+      JNIConvertHelper::ConvertToString(env, j_url),
+      JNIConvertHelper::ConvertToString(env, j_source), pipeline_options,
+      template_data);
+  AtomicLifecycle::TryFree(lifecycle_ptr);
+}
+
 void LoadTemplateBufferByPreParsedData(
     JNIEnv* env, jclass jcaller, jlong ptr, jlong lifecycle, jstring url,
     jobject bufferPtr, jboolean is_pre_painting,
